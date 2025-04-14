@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+
+{% block title %}Alertas y Reglas{% endblock %}
+
+{% block content %}
+<h1>🚨 Alertas y Reglas</h1>
+<p>Monitorea alertas generadas por el sistema de detección.</p>
+
+<div class="alert-options">
+     <a href="{{ url_for('alerts', show_all='false') }}" class="button {% if not show_all %}button-secondary{% endif %}">Mostrar Activas</a>
+     <a href="{{ url_for('alerts', show_all='true') }}" class="button {% if show_all %}button-secondary{% endif %}">Mostrar Todas</a>
+     {# Botón para configurar alertas podría ir aquí o en Admin #}
+     {# <a href="{{ url_for('configure_alerts_page') }}" class="button">Configurar</a> #}
+</div>
+
+
+<h2>Monitor de Alertas {% if not show_all %}(Activas - No Revisadas){% else %}(Todas){% endif %}</h2>
+
+{% if alerts %}
+    <div class="table-container" style="max-height: 600px;"> {# Ajusta altura si es necesario #}
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Timestamp</th>
+                    <th>Tipo</th>
+                    <th>Severidad</th>
+                    <th>Detalles</th>
+                    <th>Revisada</th>
+                    <th>Acción</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for alert in alerts %} {# Ya vienen ordenadas desde Flask #}
+                <tr class="severity-{{ alert.severity | lower }} {% if alert.reviewed %}reviewed-alert{% endif %}">
+                    <td>{{ alert.id }}</td>
+                    <td>{{ alert.timestamp | format_datetime }}</td>
+                    <td>{{ alert.type }}</td>
+                    <td>{{ alert.severity }}</td>
+                    <td>{{ alert.details }}</td>
+                    <td>{{ 'Sí' if alert.reviewed else 'No' }}</td>
+                    <td>
+                        {% if not alert.reviewed %}
+                        <form method="POST" action="{{ url_for('alerts') }}" style="margin: 0;">
+                            <input type="hidden" name="alert_id" value="{{ alert.id }}">
+                            <button type="submit" class="button button-sm button-secondary">Marcar Revisada</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% else %}
+    <p>No hay alertas {{ 'activas' if not show_all else '' }} para mostrar.</p>
+{% endif %}
+
+<div class="preview-section" style="margin-top: 2rem;">
+    <h2>Gestión de Reglas (Placeholder)</h2>
+    <p>Esta funcionalidad requiere un motor de reglas más complejo.</p>
+    <pre style="background-color: #eee; padding: 10px; border-radius: 4px;"><code>
+# Ejemplo de reglas (no funcionales)
+- SI alerta_tipo == 'DDoS' Y severidad == 'Crítica' ENTONCES bloquear_ip_origen DURANTE 3600s
+- SI count(alerta_tipo == 'Port Scanning' DESDE ip_origen) > 10 EN 60s ENTONCES notificar_admin
+    </code></pre>
+</div>
+
+
+{% endblock %}
+
+{% block extra_js %}
+<style>
+/* Añade esto a tu style.css o aquí si prefieres */
+.alert-options {
+    margin-bottom: 1.5rem;
+    display: flex;
+    gap: 0.5rem; /* Espacio entre botones */
+}
+.button-sm { /* Botón más pequeño para la tabla */
+    padding: 0.3rem 0.6rem;
+    font-size: 0.8rem;
+}
+.reviewed-alert td { /* Estilo para alertas revisadas */
+    color: #777;
+    font-style: italic;
+}
+.severity-crítica { background-color: #e74c3c; color: white; font-weight: bold; } /* Más rojo */
+.severity-alta { background-color: #f8d7da; color: #721c24; }
+.severity-media { background-color: #fff3cd; color: #856404; }
+/* Baja severidad podría no tener estilo o uno muy sutil */
+</style>
+<script>
+    console.log("Alerts JS loaded");
+</script>
+{% endblock %}

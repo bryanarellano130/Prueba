@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+
+{% block title %}Lista de Usuarios{% endblock %}
+
+{% block content %}
+    <h1>Gestión de Usuarios</h1>
+    <a href="{{ url_for('admin_landing') }}" class="button button-secondary" style="margin-bottom: 1rem;">Volver a Administración</a>
+
+    {% if users %}
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Usuario</th>
+                    <th>Email</th>
+                    <th>Admin</th>
+                    <th>Registrado</th>
+                    <th>Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.email }}</td>
+                    <td>{{ 'Sí' if user.is_admin else 'No' }}</td>
+                    <td>{{ user.created_at | format_datetime if user.created_at else 'N/A' }}</td>
+                    <td>
+                        {# Placeholder para botones de editar/eliminar #}
+                        <button class="button button-sm button-secondary" disabled>Editar</button>
+                        <button class="button button-sm delete-action-button" disabled style="background-color: #c0392b;">Eliminar</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p>No hay usuarios registrados.</p>
+    {% endif %}
+
+    {# Botón para añadir nuevo usuario (llevaría a /register o a un form admin) #}
+    {# <a href="{{ url_for('register') }}" class="button">Añadir Nuevo Usuario</a> #}
+
+{% endblock %}

@@ -1,0 +1,148 @@
+{% extends 'base.html' %}
+
+{% block title %}Detección y Análisis{% endblock %}
+
+{% block content %}
+<h1>🔍 Detección y Análisis</h1>
+<p>Aplica el modelo de Machine Learning ({{ 'Real' if detector.model else 'Simulado' }}) para detectar amenazas.</p>
+
+<div class="action-card">
+    <h2>1. Seleccionar Datos y Ejecutar Detección</h2>
+    <form method="POST" action="{{ url_for('detect') }}" id="detection-form">
+        <div class="form-group">
+            <label for="datasource">Fuente de Datos para Analizar:</label>
+            <select id="datasource" name="datasource" required>
+                <option value="">-- Selecciona una fuente --</option>
+                {% if has_processed_data %}
+                    <option value="processed">Usar Datos Cargados y Preprocesados</option>
+                {% endif %}
+                {% if has_simulation_data %}
+                     {# Asegúrate que la ruta POST /detect sepa preprocesar esto #}
+                    <option value="simulation">Usar Datos de la Última Simulación (Requiere Preprocesamiento)</option>
+                {% endif %}
+                {# Podrías añadir opción 'upload_direct' si implementas carga directa aquí #}
+            </select>
+             {# Mostrar advertencias sobre disponibilidad de datos #}
+            {% if not has_processed_data %}
+                 <small style="color: orange; display: block; margin-top: 5px;">Opción 'Datos Preprocesados' no disponible. Carga y preprocesa datos en la sección 'Gestión de Datos'.</small>
+            {% endif %}
+             {% if not has_simulation_data %}
+                 <small style="color: orange; display: block; margin-top: 5px;">Opción 'Última Simulación' no disponible. Ejecuta una simulación primero.</small>
+            {% endif %}
+        </div>
+        <div class="form-group">
+            {# Este botón ahora se maneja con JS si usas el ejemplo AJAX, si no, funciona como submit normal #}
+            <button type="submit" class="button" {% if not has_processed_data and not has_simulation_data %}disabled{% endif %}>
+                Iniciar Detección
+            </button>
+        </div>
+    </form>
+    {# Indicador de carga para AJAX (inicialmente oculto) #}
+    <div id="loading-indicator" style="display: none; margin-top: 1rem;">
+        <p><strong>Ejecutando detección... por favor espera.</strong></p>
+        {# Podrías añadir un spinner CSS aquí #}
+    </div>
+</div>
+
+{# Área para mostrar resultados (especialmente si usas AJAX) #}
+<div id="detection-results-area">
+    {# Mostrar los últimos resultados si existen en la sesión (cargados por GET) #}
+    {% if last_results %}
+        <div class="preview-section">
+            <h2>Resultados de la Última Detección ({{ last_results.timestamp | format_datetime }})</h2>
+
+            {# Mostrar Métricas #}
+            {% if last_results.metrics and last_results.metrics.accuracy is not none %}
+                <h3>Métricas de Rendimiento</h3>
+                <p><strong>Exactitud (Accuracy):</strong> {{ "%.4f" % last_results.metrics.accuracy }} ({{ "%.2f%%" % (last_results.metrics.accuracy * 100) }})</p>
+
+                {# Mostrar Matriz de Confusión si la URL de la imagen existe #}
+                {% if cm_plot_url %}
+                <div style="margin-top: 1rem; margin-bottom: 1rem;">
+                    <h4>Matriz de Confusión:</h4>
+                    <img src="{{ cm_plot_url }}" alt="Matriz de Confusión" style="max-width: 400px; height: auto; border: 1px solid #ccc;">
+                </div>
+                {% endif %}
+
+                {# Mostrar Reporte de Clasificación si el DataFrame existe #}
+                {% if report_df is not none %}
+                <div style="margin-top: 1rem; margin-bottom: 1rem;">
+                    <h4>Reporte de Clasificación:</h4>
+                    <div class="table-container" style="max-height: 300px;"> {# Limitar altura #}
+                         {{ report_df.to_html(classes=['data-table', 'table-sm'], border=0, float_format='%.4f') | safe }}
+                    </div>
+                </div>
+                {% endif %}
+
+            {% else %}
+                <p>No se calcularon métricas detalladas (posiblemente faltan etiquetas 'label' en los datos analizados).</p>
+            {% endif %}
+
+             {# Mostrar Vista Previa de Datos con Predicciones #}
+            {% if last_results.data_head %}
+                <h3 style="margin-top: 2rem;">Vista Previa de Predicciones (Primeras 50 Filas)</h3>
+                 <div class="table-container" style="max-height: 500px;">
+                     {# Asumiendo que data_head es una lista de dicts, la convertimos a DF para mostrar #}
+                     {# O mejor, pasa el HTML directamente desde Flask como hicimos antes #}
+                     {% set preview_df = pandas.DataFrame(last_results.data_head) %}
+                     {{ preview_df[['timestamp', 'src_ip', 'dst_ip', 'protocol', 'label', 'prediction_label']].to_html(classes=['data-table', 'table-sm'], border=0, index=False, max_rows=50) | safe }}
+                </div>
+            {% endif %}
+        </div>
+    {% else %}
+         {# Mensaje si no hay resultados previos #}
+         <p style="margin-top: 1rem;">Selecciona una fuente de datos y ejecuta la detección para ver los resultados aquí.</p>
+    {% endif %}
+</div>
+
+
+{# Historial de Detecciones #}
+<div class="preview-section" style="margin-top: 2rem;">
+    <h2>Historial de Detecciones</h2>
+    {% if detection_history %}
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Tamaño Dataset</th>
+                    <th>Umbral Modelo</th>
+                    <th>Accuracy</th>
+                    {# Podrías añadir más columnas si guardas más info #}
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in detection_history | reverse %} {# Más recientes primero #}
+                <tr>
+                    <td>{{ entry.timestamp | format_datetime }}</td>
+                    <td>{{ entry.dataset_size }}</td>
+                    <td>{{ "%.2f" % entry.model_threshold }}</td>
+                    <td>
+                        {% if entry.metrics.accuracy is not none %}
+                             {{ "%.4f" % entry.metrics.accuracy }}
+                        {% else %}
+                            N/A
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No hay historial de detecciones.</p>
+    {% endif %}
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+{# Importar pandas vía CDN si quieres convertir la lista de dicts a DF en el navegador #}
+{# <script src="https://cdn.jsdelivr.net/npm/danfojs@1.1.2/lib/bundle.min.js"></script> #}
+{# O mejor, pasa el HTML pre-renderizado desde Flask #}
+
+{# Añade la lógica AJAX si quieres usarla (ver ejemplo en static/js/main.js) #}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+<script>
+    console.log("Detection JS loaded");
+    // Si no usas AJAX, puedes quitar el script AJAX de main.js o no añadirlo aquí.
+</script>
+{% endblock %}

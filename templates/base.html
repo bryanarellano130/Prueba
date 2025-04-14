@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Sistema de Ciberseguridad{% endblock %} - CyberSystem</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>"> {# Favicon simple #}
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">🛡️ CyberSystem</a>
+            <div class="navbar-links">
+                {# Añadir 'active' class dinámicamente basado en request.endpoint #}
+                <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Panel</a>
+                <a href="{{ url_for('manage_data') }}" class="{{ 'active' if request.endpoint == 'manage_data' else '' }}">Datos</a>
+                <a href="{{ url_for('simulate') }}" class="{{ 'active' if request.endpoint == 'simulate' else '' }}">Simulador</a>
+                <a href="{{ url_for('detect') }}" class="{{ 'active' if request.endpoint == 'detect' else '' }}">Detección</a>
+                <a href="{{ url_for('alerts') }}" class="{{ 'active' if request.endpoint == 'alerts' else '' }}">Alertas</a>
+                <a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' else '' }}">Admin</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container content-area">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category or 'info' }}">{{ message }}</div>
+                {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}
+        {% endblock %}
+    </main>
+
+    <footer>
+        <div class="container">
+            {# --- CORRECCIÓN AQUÍ --- #}
+            <p>&copy; {{ current_year }} Sistema Inteligente de Ciberseguridad</p>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block extra_js %}{% endblock %} {# Para JS específico de página #}
+</body>
+</html>
