@@ -5,20 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Sistema de Ciberseguridad{% endblock %} - CyberSystem</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>"> {# Favicon simple #}
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
 </head>
 <body>
     <nav class="navbar">
         <div class="container">
             <a class="navbar-brand" href="{{ url_for('dashboard') }}">🛡️ CyberSystem</a>
             <div class="navbar-links">
-                {# Añadir 'active' class dinámicamente basado en request.endpoint #}
-                <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Panel</a>
-                <a href="{{ url_for('manage_data') }}" class="{{ 'active' if request.endpoint == 'manage_data' else '' }}">Datos</a>
-                <a href="{{ url_for('simulate') }}" class="{{ 'active' if request.endpoint == 'simulate' else '' }}">Simulador</a>
-                <a href="{{ url_for('detect') }}" class="{{ 'active' if request.endpoint == 'detect' else '' }}">Detección</a>
-                <a href="{{ url_for('alerts') }}" class="{{ 'active' if request.endpoint == 'alerts' else '' }}">Alertas</a>
-                <a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' else '' }}">Admin</a>
+                {# Links principales (solo si está autenticado) #}
+                {% if current_user.is_authenticated %}
+                    <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Panel</a>
+                    <a href="{{ url_for('manage_data') }}" class="{{ 'active' if request.endpoint == 'manage_data' else '' }}">Datos</a>
+                    <a href="{{ url_for('simulate') }}" class="{{ 'active' if request.endpoint == 'simulate' else '' }}">Simulador</a>
+                    <a href="{{ url_for('detect') }}" class="{{ 'active' if request.endpoint == 'detect' else '' }}">Detección</a>
+                    <a href="{{ url_for('alerts') }}" class="{{ 'active' if request.endpoint == 'alerts' else '' }}">Alertas</a>
+                    {# Mostrar Admin solo si es admin #}
+                    {% if current_user.is_admin %}
+                         <a href="{{ url_for('admin_landing') }}" class="{{ 'active' if request.endpoint.startswith('admin') or request.endpoint == 'list_users' else '' }}">Admin</a>
+                    {% endif %}
+                 {% endif %}
+
+                 {# Links de Autenticación #}
+                 {% if current_user.is_authenticated %}
+                     <span style="margin-left: 20px; color: #bdc3c7;">Hola, {{ current_user.username }}!</span>
+                     <a href="{{ url_for('logout') }}" style="margin-left: 15px;">Cerrar Sesión</a>
+                 {% else %}
+                      <a href="{{ url_for('login') }}" class="{{ 'active' if request.endpoint == 'login' else '' }}">Iniciar Sesión</a>
+                      <a href="{{ url_for('register') }}" class="{{ 'active' if request.endpoint == 'register' else '' }}">Registrarse</a>
+                 {% endif %}
             </div>
         </div>
     </nav>
@@ -33,19 +47,16 @@
                 </div>
             {% endif %}
         {% endwith %}
-
-        {% block content %}
-        {% endblock %}
+        {% block content %}{% endblock %}
     </main>
 
     <footer>
         <div class="container">
-            {# --- CORRECCIÓN AQUÍ --- #}
             <p>&copy; {{ current_year }} Sistema Inteligente de Ciberseguridad</p>
         </div>
     </footer>
 
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
-    {% block extra_js %}{% endblock %} {# Para JS específico de página #}
+    {% block extra_js %}{% endblock %}
 </body>
 </html>
