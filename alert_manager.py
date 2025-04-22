@@ -1,4 +1,3 @@
-# alert_manager.py
 import datetime
 import json
 import os
@@ -20,7 +19,7 @@ class AlertManager:
 
         Args:
             config_defaults (dict, optional): Valores por defecto para la configuración.
-                                             Defaults to {'severity_threshold': 'Media', 'notify_email': False}.
+                                            Defaults to {'severity_threshold': 'Media', 'notify_email': False}.
         """
         self.alerts = [] # Para las alertas específicas
         self.detection_history = [] # <-- NUEVA LISTA PARA EL HISTORIAL DE DETECCIONES
@@ -112,23 +111,52 @@ class AlertManager:
             print(f"ERROR: Error inesperado al guardar historial: {e}")
             print(traceback.format_exc())
 
-
+    # --- MÉTODO MODIFICADO ---
     def add_detection_to_history(self, history_entry):
         """
-        Añade una entrada de resumen de detección al historial.
+        Añade una entrada de resumen de detección al historial, evitando duplicados exactos.
         La entrada debe ser un diccionario serializable (sin DataFrames o objetos complejos).
         """
+        print("DEBUG: -> Dentro add_detection_to_history")
         if isinstance(history_entry, dict):
-            # Opcional: Limitar el tamaño del historial si crece demasiado
-            max_history_entries = 100 # Por ejemplo, guardar solo las últimas 100 entradas
-            if len(self.detection_history) >= max_history_entries:
-                self.detection_history.pop(0) # Eliminar la entrada más antigua
+            print("DEBUG: -> history_entry es un diccionario")
 
-            self.detection_history.append(history_entry)
-            self._save_detection_history() # Guardar después de añadir
-            # print("DEBUG: Entrada de historial añadida.")
+            # --- COMPROBACIÓN ANTI-DUPLICADOS ---
+            # Comprueba si una entrada EXACTAMENTE IGUAL ya existe en las últimas N entradas
+            # (Revisar las últimas 10, por ejemplo, para eficiencia)
+            already_exists = False
+            check_range = min(10, len(self.detection_history)) # Revisa las últimas 10 o menos
+            # Itera desde la penúltima hasta N entradas atrás
+            for i in range(1, check_range + 1):
+                 # Compara la entrada nueva con una entrada existente del historial
+                 if self.detection_history[-i] == history_entry: # Comparación directa de diccionarios
+                     already_exists = True
+                     print(f"DEBUG: -> Entrada duplicada detectada. No se añadirá: {history_entry}")
+                     break # Sale del bucle for si encuentra duplicado
+
+            # Si no es duplicado, procede a añadir y guardar
+            if not already_exists:
+                # Opcional: Limitar el tamaño del historial si crece demasiado
+                max_history_entries = 100 # Por ejemplo, guardar solo las últimas 100 entradas
+                if len(self.detection_history) >= max_history_entries:
+                    print("DEBUG: -> Límite tamaño historial alcanzado, eliminando más antiguo.")
+                    self.detection_history.pop(0) # Eliminar la entrada más antigua
+                    print("DEBUG: <- Eliminado entrada más antigua.")
+
+                print("DEBUG: -> Añadiendo history_entry a self.detection_history")
+                self.detection_history.append(history_entry) # <-- Aquí se añade al historial en memoria
+                print(f"DEBUG: <- Añadido history_entry. Tamaño actual del historial: {len(self.detection_history)}")
+
+                print("DEBUG: -> Llamando a _save_detection_history()")
+                self._save_detection_history() # Guardar la lista actualizada en el archivo JSON
+                print("DEBUG: <- _save_detection_history() retornó.")
+
+                print("INFO: Resumen de detección añadido al historial.")
+            # --- FIN COMPROBACIÓN ANTI-DUPLICADOS ---
+
         else:
             print(f"ERROR: Intento de añadir al historial con un formato incorrecto: {type(history_entry)}")
+        print("DEBUG: <- Saliendo de add_detection_to_history")
 
 
     def get_detection_history(self):
@@ -138,9 +166,9 @@ class AlertManager:
         history_to_sort = self.detection_history
         try:
              return sorted(
-                history_to_sort,
-                key=lambda x: x.get('timestamp', '1970-01-01T00:00:00'), # Usar un timestamp por defecto para evitar errores
-                reverse=True
+                 history_to_sort,
+                 key=lambda x: x.get('timestamp', '1970-01-01T00:00:00'), # Usar un timestamp por defecto para evitar errores
+                 reverse=True
              )
         except Exception as e:
              print(f"ERROR ordenando historial de detecciones: {e}")
@@ -155,8 +183,8 @@ class AlertManager:
 
         Args:
             detection_results_df (pd.DataFrame): DataFrame con los resultados de la detección,
-                                             debe incluir 'prediction_label' y otras
-                                             columnas relevantes (src_ip, dst_ip, label, etc.).
+                                                 debe incluir 'prediction_label' y otras
+                                                 columnas relevantes (src_ip, dst_ip, label, etc.).
 
         Returns:
             tuple: (int, list) El número de nuevas alertas generadas y la lista
@@ -196,7 +224,7 @@ class AlertManager:
 
             # Determinar la severidad basada en la etiqueta detectada
             # Usar .get con un valor por defecto si la etiqueta no está en severity_map
-            severity = severity_map.get(attack_type_detected, severity_map.get('ATTACK', 'Media')) # Por defecto 'Media' si ni siquiera ATTACK está mapeado
+            severity = severity_map.get(attack_type_detected, severity_map.get('ATTACK', 'Media')) # Por defecto 'Media' if ni siquiera ATTACK está mapeado
 
             current_severity_level = severity_levels.get(severity, 1)
 
@@ -311,8 +339,8 @@ class AlertManager:
         if notify_email is not None and isinstance(notify_email, bool):
              # Usar .get() para comparar de forma segura
              if self.config.get('notify_email') != notify_email:
-                self.config['notify_email'] = notify_email
-                print(f"INFO: Notificación Email {'Activada' if notify_email else 'Desactivada'}."); updated = True
+                 self.config['notify_email'] = notify_email
+                 print(f"INFO: Notificación Email {'Activada' if notify_email else 'Desactivada'}."); updated = True
         # Manejar caso donde notify_email es None o inválido, pero severity_threshold sí se envió
         elif notify_email is not None: # Si se envió pero es inválido
              print("ERROR: Valor inválido recibido para notify_email (debe ser True/False)"); return False
