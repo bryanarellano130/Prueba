@@ -1,0 +1,83 @@
+{# templates/settings.html #}
+{% extends 'base.html' %}
+
+{% block title %}Configuración del Sistema{% endblock %}
+
+{% block content %}
+<h1>⚙️ Configuración del Sistema</h1>
+<p>Ajusta los parámetros de detección y alertas. Estos cambios se aplicarán inmediatamente.</p>
+
+{# Mostrar mensajes flash si existen #}
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+    {% endif %}
+{% endwith %}
+
+<div class="action-card">
+    <h2>Parámetros de Detección</h2>
+    <form method="POST" action="{{ url_for('settings') }}">
+        {# Campo CSRF (si usas Flask-WTF con CSRF habilitado) - Descomentar si aplica #}
+        {# {{ form.hidden_tag() }} #}
+
+        <div class="form-group">
+            <label for="glm_threshold">Umbral de Predicción del Modelo (Probabilidad):</label>
+            {# Comprobar si el valor es None (indicando error al cargar) #}
+            {% if glm_threshold is not none %}
+                <input type="number" id="glm_threshold" name="glm_threshold"
+                       value="{{ glm_threshold | round(3) }}"
+                       min="0.01" max="0.99" step="0.01" required
+                       aria-describedby="thresholdHelp">
+                <small id="thresholdHelp" class="form-text text-muted">
+                    Valor entre 0.01 y 0.99. Probabilidades mayores o iguales a este valor se clasificarán como ataque.
+                </small>
+            {% else %}
+                <input type="text" value="Error al cargar umbral" disabled class="form-control is-invalid">
+                <small class="form-text text-danger">
+                    No se pudo cargar el umbral actual. El detector podría no estar inicializado.
+                </small>
+            {% endif %}
+        </div>
+
+        {# Puedes añadir más configuraciones del detector aquí si las tienes #}
+
+        <hr> {# Separador visual #}
+
+        <h2>Configuración de Alertas</h2>
+
+        <div class="form-group">
+            <label for="severity_threshold">Nivel Mínimo de Severidad para Notificar:</label>
+            <select id="severity_threshold" name="severity_threshold" class="form-control">
+                {# Usar los niveles pasados desde app.py #}
+                {% for level in alert_severity_levels %}
+                    <option value="{{ level }}" {% if level == severity_threshold %}selected{% endif %}>
+                        {{ level }}
+                    </option>
+                {% endfor %}
+            </select>
+            <small class="form-text text-muted">
+                Se generarán alertas para detecciones con esta severidad o superior.
+            </small>
+        </div>
+
+        <div class="form-group form-check">
+            <input type="checkbox" class="form-check-input" id="notify_email" name="notify_email"
+                   {% if notify_email %}checked{% endif %}>
+            <label class="form-check-label" for="notify_email">Habilitar Notificaciones por Email (Funcionalidad Pendiente)</label>
+             <small class="form-text text-muted">
+                (Actualmente solo guarda la configuración, no envía emails).
+            </small>
+        </div>
+
+        {# Puedes añadir más configuraciones de alertas aquí #}
+
+        <div class="form-group" style="margin-top: 1.5rem;">
+            <button type="submit" class="button">Guardar Cambios</button>
+            <a href="{{ url_for('admin_landing') }}" class="button button-secondary">Cancelar</a>
+        </div>
+    </form>
+</div>
+
+{% endblock %}

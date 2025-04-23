@@ -61,18 +61,10 @@ Notificar por Email (Simulado)
 
 {# Tarjeta para Reentrenamiento #}
 <div class="action-card">
-<h2>Reentrenamiento del Modelo</h2>
-<p>Esta funcionalidad requiere una implementación más compleja.</p>
-<form method="POST" action="{{ url_for('admin_actions') }}">
-<input type="hidden" name="action" value="retrain">
-<div class="form-group">
-{# Añadida clase para confirmación JS y mensaje personalizado #}
-<button type="submit" class="button button-secondary delete-action-button"
-data-confirm-message="¿Estás seguro de iniciar el reentrenamiento (simulado)?">
-Iniciar Reentrenamiento (Simulado)
-</button>
-</div>
-</form>
+    <h2>Reentrenamiento del Modelo</h2>
+    <p>Para reentrenar el modelo con nuevos datos, ve a la página dedicada.</p> {# Updated description #}
+    {# Replace the form with a link #}
+    <a href="{{ url_for('retrain_page') }}" class="button button-secondary">Ir a Página de Reentrenamiento</a>
 </div>
 
 {# Tarjeta para Gestión de Usuarios --- CAMBIO --- #}

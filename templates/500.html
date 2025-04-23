@@ -1,0 +1,36 @@
+{# templates/500.html #}
+{% extends "base.html" %}
+
+{% block title %}Error Interno del Servidor{% endblock %}
+
+{% block content %}
+<div class="error-page">
+  <h1>🔥 500 - Error Interno del Servidor</h1>
+  <p>¡Ups! Algo salió mal en nuestro lado.</p>
+  <p>Hemos sido notificados del problema y estamos trabajando para solucionarlo.</p>
+  <p>Por favor, intenta de nuevo más tarde o vuelve al <a href="{{ url_for('dashboard') }}">Dashboard Principal</a>.</p>
+  {# En modo DEBUG, podrías mostrar más detalles si quisieras, pero no en producción #}
+  {# {% if config.DEBUG %}
+       <pre style="text-align: left; background-color: #eee; padding: 10px;">{{ error_details | safe }}</pre>
+     {% endif %} #}
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .error-page {
+    text-align: center;
+    margin-top: 50px;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+  }
+  .error-page h1 {
+    color: #ffc107; /* Color amarillo Bootstrap para advertencia */
+  }
+   .error-page p {
+      margin-bottom: 15px;
+  }
+</style>
+{% endblock %}

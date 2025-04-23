@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+
+{% block title %}Cargar Datos{% endblock %}
+
+{% block content %}
+<h1>📂 Cargar Datos</h1>
+<p>Sube un archivo CSV para analizar.</p>
+
+<div class="action-card">
+    <h2>Seleccionar Archivo</h2>
+    {# El formulario debe enviar a la ruta 'upload_data' con método POST y enctype para archivos #}
+    {# Asegúrate que la ruta 'upload_data' en app.py maneje el método POST #}
+    <form method="POST" action="{{ url_for('upload_data') }}" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="file">Selecciona un archivo CSV:</label>
+            <input type="file" name="file" id="file" accept=".csv" required>
+        </div>
+        <div class="form-group">
+            {# Token CSRF si usas Flask-WTF o similar #}
+            {# {{ form.csrf_token }} #}
+            <button type="submit" class="button">Subir Archivo</button>
+        </div>
+    </form>
+</div>
+
+{# Sección opcional para mostrar el último archivo cargado si existe #}
+{# Asumimos que pasas 'data_info' a la plantilla si hay datos cargados #}
+{% if data_info %}
+     <div class="preview-section" style="margin-top: 2rem;">
+         <h2>Últimos Datos Cargados: {{ data_info.filename if data_info.filename is defined else 'Archivo Desconocido' }}</h2>
+         <p>Fuente: {{ data_info.source if data_info.source is defined else 'N/A' }}</p>
+         <p>Cargado: {{ data_info.timestamp | format_datetime if data_info.timestamp is defined else 'N/A' }}</p>
+         <p>Total de Filas: {{ data_info.total_rows if data_info.total_rows is defined else 'N/A' }}</p> {# Asumiendo que guardas el total de filas #}
+         {# Mostrar vista previa si dataframe_head está disponible #}
+         {% if data_info.dataframe_head is defined and data_info.dataframe_head is not none and data_info.dataframe_head|length > 0 %}
+             <h4>Vista Previa (Primeras filas):</h4>
+             <div class="table-container" style="max-height: 400px;"> {# Contenedor con scroll #}
+                 <table class="data-table">
+                     <thead>
+                         <tr>
+                             {# Obtener encabezados de la primera fila si existe #}
+                             {% for header in data_info.dataframe_head[0].keys() %}
+                                  <th>{{ header }}</th>
+                             {% endfor %}
+                         </tr>
+                     </thead>
+                     <tbody>
+                           {# Iterar sobre cada fila (diccionario) #}
+                           {% for row in data_info.dataframe_head %}
+                               <tr>
+                                   {# Iterar sobre los valores de cada fila en el orden de los encabezados #}
+                                   {% for header in data_info.dataframe_head[0].keys() %}
+                                       <td>{{ row[header] if row[header] is not none else '' }}</td> {# Mostrar valor o vacío si es None #}
+                                   {% endfor %}
+                               </tr>
+                           {% endfor %}
+                     </tbody>
+                 </table>
+             </div>
+         {% else %}
+               <p>No hay vista previa de datos disponible.</p>
+         {% endif %}
+
+         {# Opción para usar estos datos cargados en Detección #}
+         {# Asumimos que la ruta 'detect_threats_route' puede recibir un indicador para usar los datos cargados #}
+         {# Esto requiere que la ruta '/detect' acepte un parámetro 'source=upload' #}
+         <form method="GET" action="{{ url_for('detect_threats_route') }}" style="margin-top: 1rem;"> {# Usar GET para pasar parámetros #}
+             <input type="hidden" name="source" value="upload_last"> {# Indicador de fuente #}
+             <button type="submit" class="button button-secondary">Usar estos datos cargados para Detección</button>
+         </form>
+
+     </div>
+{% else %}
+     {# Mensaje si no se ha cargado ningún dato aún #}
+     <p>No hay datos cargados actualmente. Sube un archivo CSV arriba para empezar.</p>
+{% endif %}
+
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    console.log("Upload JS loaded");
+    // Puedes añadir JS aquí para previsualizar el nombre del archivo seleccionado, etc.
+</script>
+{% endblock %}

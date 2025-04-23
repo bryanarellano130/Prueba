@@ -5,58 +5,93 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Sistema de Ciberseguridad{% endblock %} - CyberSystem</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {# Favicon con un emoji de escudo #}
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+    {# Opcional: Añadir otros metadatos como descripción, autor, etc. #}
 </head>
 <body>
     <nav class="navbar">
         <div class="container">
+            {# Marca o logo con enlace al dashboard #}
             <a class="navbar-brand" href="{{ url_for('dashboard') }}">🛡️ CyberSystem</a>
             <div class="navbar-links">
-                {# Links principales (solo si está autenticado) #}
+                {# Links principales de navegación #}
+                {# Los mostramos solo si el usuario está autenticado #}
                 {% if current_user.is_authenticated %}
+                    {# Enlace al Panel (Dashboard) #}
                     <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Panel</a>
-                    <a href="{{ url_for('manage_data') }}" class="{{ 'active' if request.endpoint == 'manage_data' else '' }}">Datos</a>
-                    <a href="{{ url_for('simulate') }}" class="{{ 'active' if request.endpoint == 'simulate' else '' }}">Simulador</a>
-                    <a href="{{ url_for('detect') }}" class="{{ 'active' if request.endpoint == 'detect' else '' }}">Detección</a>
-                    <a href="{{ url_for('alerts') }}" class="{{ 'active' if request.endpoint == 'alerts' else '' }}">Alertas</a>
-                    {# Mostrar Admin solo si es admin #}
-                    {% if current_user.is_admin %}
-                         <a href="{{ url_for('admin_landing') }}" class="{{ 'active' if request.endpoint.startswith('admin') or request.endpoint == 'list_users' else '' }}">Admin</a>
-                    {% endif %}
-                 {% endif %}
+                    {# --- CORREGIDO: Cambiado 'manage_data' por 'view_data' --- #}
+                    {# Enlace a la página de visualización de Datos cargados #}
+                    <a href="{{ url_for('view_data') }}" class="{{ 'active' if request.endpoint == 'view_data' or request.endpoint == 'upload_data' else '' }}">Datos</a> {# Considerar 'upload_data' también como activo si esa es la página relacionada #}
+                    {# Enlace al Simulador #}
+                    <a href="{{ url_for('simulate_threats_route') }}" class="{{ 'active' if request.endpoint == 'simulate_threats_route' else '' }}">Simulador</a> {# Asegúrate que el nombre de la ruta sea 'simulate_threats_route' o como la definiste #}
+                    {# Enlace a la página de Detección #}
+                    <a href="{{ url_for('detect_threats_route') }}" class="{{ 'active' if request.endpoint == 'detect_threats_route' else '' }}">Detección</a> {# Asegúrate que el nombre de la ruta sea 'detect_threats_route' o como la definiste #}
+                    {# Enlace a la página de Alertas #}
+                    <a href="{{ url_for('view_alerts') }}" class="{{ 'active' if request.endpoint == 'view_alerts' else '' }}">Alertas</a> {# Asegúrate que el nombre de la ruta sea 'view_alerts' o como la definiste #}
 
-                 {# Links de Autenticación #}
-                 {% if current_user.is_authenticated %}
-                     <span style="margin-left: 20px; color: #bdc3c7;">Hola, {{ current_user.username }}!</span>
-                     <a href="{{ url_for('logout') }}" style="margin-left: 15px;">Cerrar Sesión</a>
-                 {% else %}
-                      <a href="{{ url_for('login') }}" class="{{ 'active' if request.endpoint == 'login' else '' }}">Iniciar Sesión</a>
-                      <a href="{{ url_for('register') }}" class="{{ 'active' if request.endpoint == 'register' else '' }}">Registrarse</a>
-                 {% endif %}
+                    {# Mostrar enlace de Admin solo si el usuario actual es administrador #}
+                    {% if current_user.is_admin %}
+                        {# Asumiendo que tienes una página de aterrizaje admin o quieres activar el link para cualquier ruta que empiece con 'admin' #}
+                         <a href="{{ url_for('admin_model_config') }}" class="{{ 'active' if request.endpoint.startswith('admin_') or request.endpoint == 'admin_users' else '' }}">Admin</a> {# Ajusta el enlace y la condición 'active' según tus rutas admin (ej. 'admin_landing', 'admin_users', etc.) #}
+                    {% endif %}
+                {% endif %} {# Fin if authenticated #}
+
+                {# Links de Autenticación (Login/Registro o Saludo/Logout) #}
+                {% if current_user.is_authenticated %}
+                    {# Saludo al usuario logueado #}
+                    <span class="nav-username">Hola, {{ current_user.username }}!</span>
+                    {# Enlace para cerrar sesión #}
+                    <a href="{{ url_for('logout') }}" class="nav-logout">Cerrar Sesión</a>
+                {% else %}
+                    {# Enlace para iniciar sesión #}
+                    <a href="{{ url_for('login') }}" class="{{ 'active' if request.endpoint == 'login' else '' }}">Iniciar Sesión</a>
+                    {# Enlace para registrarse #}
+                    <a href="{{ url_for('register') }}" class="{{ 'active' if request.endpoint == 'register' else '' }}">Registrarse</a>
+                {% endif %}
             </div>
         </div>
     </nav>
 
     <main class="container content-area">
+        {# Sección para mostrar mensajes flash (alertas de sistema) #}
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 <div class="flash-messages">
                 {% for category, message in messages %}
+                    {# La categoría puede ser 'success', 'danger', 'warning', 'info' etc. #}
                     <div class="alert alert-{{ category or 'info' }}">{{ message }}</div>
                 {% endfor %}
                 </div>
             {% endif %}
         {% endwith %}
+        {# Aquí se insertará el contenido específico de cada plantilla que extienda de base.html #}
         {% block content %}{% endblock %}
     </main>
 
     <footer>
         <div class="container">
+            {# Mostrar año actual (viene del context processor en app.py) #}
             <p>&copy; {{ current_year }} Sistema Inteligente de Ciberseguridad</p>
         </div>
     </footer>
 
+    {# Enlace al archivo JavaScript principal #}
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {# Bloque para añadir scripts JS adicionales específicos de cada página #}
     {% block extra_js %}{% endblock %}
+
+    <!-- Opcional: Añadir script para cerrar mensajes flash automáticamente -->
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('.flash-messages .alert').forEach(function(alert) {
+            setTimeout(function() {
+                alert.style.opacity = '0';
+                setTimeout(function() { alert.remove(); }, 500); // Espera la transición antes de remover
+            }, 5000); // Ocultar después de 5 segundos
+        });
+    });
+    </script>
+
 </body>
 </html>

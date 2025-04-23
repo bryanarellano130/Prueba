@@ -1,117 +1,77 @@
 document.addEventListener('DOMContentLoaded', function() {
-    const startBtn = document.getElementById('startRetrainBtn');
-    const statusMessage = document.getElementById('statusMessage');
-    const progressBarContainer = document.getElementById('progressBarContainer');
-    const progressBar = document.getElementById('progressBar');
-    const statusLog = document.getElementById('statusLog');
-    let taskId = null;
-    let intervalId = null;
+    const form = document.getElementById('retrain-form');
+    const statusDiv = document.getElementById('retrain-status');
+    const submitButton = document.getElementById('retrain-button');
+    const loadingSpinner = document.getElementById('loading-spinner');
+    const fileInput = document.getElementById('newdata');
 
-    startBtn.addEventListener('click', function() {
-        // Deshabilitar botón y mostrar inicio
-        startBtn.disabled = true;
-        statusMessage.textContent = 'Iniciando reentrenamiento...';
-        statusMessage.className = 'alert alert-info'; // Cambiar clase para estilo
-        progressBarContainer.style.display = 'block';
-        progressBar.style.width = '0%';
-        progressBar.textContent = '0%';
-        statusLog.textContent = ''; // Limpiar log anterior
+    if (!form || !statusDiv || !submitButton || !loadingSpinner || !fileInput) {
+        console.error("Error: No se encontraron todos los elementos del formulario en el DOM.");
+        if(statusDiv) statusDiv.innerHTML = '<div class="alert alert-danger">Error interno de la página (elementos no encontrados).</div>';
+        return; // Detener si falta algo esencial
+    }
 
-        // (Opcional: obtener data_path del input si se implementa subida)
-        // const dataPath = document.getElementById('dataInput').value;
+    form.addEventListener('submit', function(event) {
+        event.preventDefault(); // Prevenir el envío normal
 
-        // Llamar a la ruta de inicio en el backend
-        fetch('/retrain/start', { // Asegúrate que la URL sea correcta
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                // Incluir CSRF token si usas Flask-WTF CSRF protection
-            },
-            // body: JSON.stringify({ data_path: dataPath }) // Enviar data_path si es dinámico
+        // Validar que se haya seleccionado un archivo
+        if (fileInput.files.length === 0) {
+            statusDiv.innerHTML = '<div class="alert alert-warning">Por favor, seleccione un archivo CSV.</div>';
+            statusDiv.className = 'alert alert-warning';
+            return;
+        }
+
+        const formData = new FormData(form);
+
+        // Mostrar indicador de carga y deshabilitar botón
+        statusDiv.innerHTML = '<div class="alert alert-info">Iniciando reentrenamiento... Esto puede tardar varios minutos. Por favor, espere.</div>';
+        statusDiv.className = 'alert alert-info'; // Limpiar clases previas
+        submitButton.disabled = true;
+        loadingSpinner.style.display = 'inline-block'; // Mostrar spinner
+
+        // Enviar la solicitud al backend (ruta /retrain definida en Flask)
+        fetch('/retrain_model', { // Use the correct Flask route
+        method: 'POST',
+            body: formData
         })
         .then(response => {
-            if (!response.ok) {
-                throw new Error(`Error del servidor: ${response.status}`);
-            }
-            return response.json();
+            // Intentar obtener el JSON incluso si la respuesta no es ok (puede contener error)
+            return response.json().then(data => ({ status: response.status, body: data }));
         })
-        .then(data => {
-            if (data.status === 'PENDING' && data.task_id) {
-                taskId = data.task_id;
-                statusMessage.textContent = `Tarea iniciada (ID: ${taskId}). Esperando progreso...`;
-                statusLog.textContent = 'Tarea en cola...\n';
-                // Empezar a consultar el estado periódicamente
-                intervalId = setInterval(checkStatus, 3000); // Consultar cada 3 segundos
+        .then(({ status, body }) => {
+            if (status >= 200 && status < 300 && body.success) {
+                // Éxito
+                statusDiv.innerHTML = `<div class="alert alert-success"><strong>Éxito:</strong> ${body.message || 'Modelo reentrenado correctamente.'}</div>`;
+                statusDiv.className = 'alert alert-success';
+                 // Limpiar el input de archivo después de éxito (opcional)
+                fileInput.value = ''; 
             } else {
-                throw new Error(data.message || 'Respuesta inesperada al iniciar tarea.');
+                // Error (del backend o respuesta no exitosa)
+                let errorMessage = 'Ocurrió un error.';
+                if (body && body.error) {
+                    errorMessage = body.error;
+                } else if (status === 400) {
+                     errorMessage = body.error || "Solicitud incorrecta (ej: archivo no válido o faltante)."
+                } else if (status === 413) {
+                     errorMessage = "El archivo es demasiado grande. El límite es 16MB."
+                } else if (status === 500) {
+                    errorMessage = body.error || "Error interno en el servidor durante el reentrenamiento."
+                }
+                console.error('Error en reentrenamiento:', status, body);
+                statusDiv.innerHTML = `<div class="alert alert-danger"><strong>Error:</strong> ${errorMessage}</div>`;
+                statusDiv.className = 'alert alert-danger';
             }
         })
         .catch(error => {
-            console.error('Error al iniciar reentrenamiento:', error);
-            statusMessage.textContent = `Error al iniciar: ${error.message}`;
-            statusMessage.className = 'alert alert-danger';
-            progressBarContainer.style.display = 'none';
-            startBtn.disabled = false; // Rehabilitar botón en caso de error inicial
+            // Error de red o al procesar la respuesta
+            console.error('Error en fetch:', error);
+            statusDiv.innerHTML = `<div class="alert alert-danger"><strong>Error de conexión:</strong> No se pudo conectar con el servidor. ${error.message || ''}</div>`;
+            statusDiv.className = 'alert alert-danger';
+        })
+        .finally(() => {
+            // Siempre se ejecuta: Habilitar botón y ocultar spinner
+            submitButton.disabled = false;
+            loadingSpinner.style.display = 'none';
         });
     });
-
-    function checkStatus() {
-        if (!taskId) return;
-
-        fetch(`/retrain/status/${taskId}`) // Asegúrate que la URL sea correcta
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`Error del servidor al consultar estado: ${response.status}`);
-                }
-                return response.json();
-             })
-            .then(data => {
-                // Actualizar UI con el estado recibido
-                statusLog.textContent = data.log || ''; // Mostrar logs
-                statusLog.scrollTop = statusLog.scrollHeight; // Auto-scroll al final
-
-                const progress = data.progress || 0;
-                progressBar.style.width = `${progress}%`;
-                progressBar.textContent = `${progress}%`;
-                progressBar.setAttribute('aria-valuenow', progress);
-
-
-                if (data.status === 'RUNNING') {
-                    statusMessage.textContent = `Procesando... (${progress}%)`;
-                    statusMessage.className = 'alert alert-info';
-                    progressBar.classList.add('progress-bar-animated');
-                } else if (data.status === 'SUCCESS') {
-                    statusMessage.textContent = '¡Reentrenamiento completado con éxito!';
-                    statusMessage.className = 'alert alert-success';
-                    progressBar.classList.remove('progress-bar-animated');
-                    clearInterval(intervalId); // Detener consultas
-                    startBtn.disabled = false; // Rehabilitar botón
-                } else if (data.status === 'FAILURE') {
-                    statusMessage.textContent = 'Error durante el reentrenamiento.';
-                    statusMessage.className = 'alert alert-danger';
-                    progressBar.classList.remove('progress-bar-animated');
-                    progressBar.classList.add('bg-danger'); // Poner barra roja
-                    clearInterval(intervalId); // Detener consultas
-                    startBtn.disabled = false; // Rehabilitar botón
-                } else if (data.status === 'PENDING') {
-                     statusMessage.textContent = `Tarea en cola... (ID: ${taskId})`;
-                     statusMessage.className = 'alert alert-secondary';
-                } else {
-                    // Estado desconocido o tarea no encontrada
-                    statusMessage.textContent = `Estado desconocido: ${data.status || 'N/A'}`;
-                    statusMessage.className = 'alert alert-warning';
-                    // Considera detener las consultas si el ID es desconocido
-                    // clearInterval(intervalId);
-                    // startBtn.disabled = false;
-                }
-            })
-            .catch(error => {
-                console.error('Error al consultar estado:', error);
-                statusMessage.textContent = `Error al consultar estado: ${error.message}`;
-                statusMessage.className = 'alert alert-danger';
-                // Considera detener las consultas si hay errores repetidos
-                // clearInterval(intervalId);
-                // startBtn.disabled = false;
-            });
-    }
 });

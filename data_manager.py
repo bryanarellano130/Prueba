@@ -2,17 +2,20 @@
 import pandas as pd
 import numpy as np
 import os
+import traceback # Importar traceback aquí también por si acaso se necesita en este archivo
 
 class DataManager:
     """Gestiona la carga y preprocesamiento de datos para la aplicación web."""
 
-    def __init__(self):
+    # --- MÉTODO CORREGIDO: Aceptar 'upload_folder' ---
+    def __init__(self, upload_folder): # <-- Añadir upload_folder aquí
         """Inicializa el gestor de datos."""
         self.loaded_data = None
         self.processed_data = None
         self.loaded_filepath = None
         self.column_dtypes = None # Para referencia futura si es necesario
-        print("INFO: DataManager inicializado.") # Puedes cambiar esto por logging
+        self.upload_folder = upload_folder # <-- Almacenar la ruta de subida
+        print(f"INFO: DataManager inicializado con carpeta de subida: {self.upload_folder}") # Opcional: para verificar
 
     def load_csv_data(self, filepath):
         """
@@ -46,6 +49,8 @@ class DataManager:
             self.loaded_filepath = None
             msg = f"Error al leer el archivo CSV '{os.path.basename(filepath)}': {e}"
             print(f"ERROR: {msg}")
+            import traceback # Importar aquí si no se importa globalmente
+            print(traceback.format_exc())
             return False, msg
 
     def preprocess_data(self):
@@ -76,10 +81,14 @@ class DataManager:
                 print(f"INFO: Columnas renombradas: {len(renamed_cols)}")
 
             # 2. Manejo de Infinitos y NaNs (Importante hacerlo antes de eliminar columnas si aplica)
-            num_infinite_before = np.isinf(df_procesado.select_dtypes(include=np.number)).sum().sum()
-            if num_infinite_before > 0:
-                print(f"INFO: Encontrados {num_infinite_before} valores infinitos, reemplazando con NaN.")
-                df_procesado.replace([np.inf, -np.inf], np.nan, inplace=True)
+            # Usar select_dtypes para evitar errores en columnas no numéricas
+            numeric_cols = df_procesado.select_dtypes(include=np.number)
+            if not numeric_cols.empty:
+                 num_infinite_before = np.isinf(numeric_cols).sum().sum()
+                 if num_infinite_before > 0:
+                     print(f"INFO: Encontrados {num_infinite_before} valores infinitos en columnas numéricas, reemplazando con NaN.")
+                     df_procesado.replace([np.inf, -np.inf], np.nan, inplace=True)
+
 
             rows_before_na = len(df_procesado)
             df_procesado.dropna(inplace=True) # Elimina filas con cualquier NaN
@@ -89,7 +98,7 @@ class DataManager:
                  print(f"INFO: {nan_removed_count} filas eliminadas debido a valores NaN.")
 
             # 3. Eliminación de columnas (Asegúrate que los nombres coincidan DESPUÉS de limpiar)
-            #    Usa los nombres de columna *limpios* aquí. ¡REVISA ESTA LISTA CUIDADOSAMENTE!
+            #     Usa los nombres de columna *limpios* aquí. ¡REVISA ESTA LISTA CUIDADOSAMENTE!
             columnas_a_eliminar_limpias = [
                  'flow_bytess', 'flow_packetss', # Revisa si la limpieza añade 's' al final
                  'fwd_psh_flags', 'bwd_psh_flags', 'fwd_urg_flags', 'bwd_urg_flags',
@@ -108,10 +117,10 @@ class DataManager:
             # Encuentra qué columnas existen realmente en el df *después* de limpiar nombres y quitar NaNs
             columnas_existentes_a_eliminar = [col for col in columnas_a_eliminar_limpias if col in df_procesado.columns]
             if columnas_existentes_a_eliminar:
-                df_procesado = df_procesado.drop(columns=columnas_existentes_a_eliminar)
-                print(f"INFO: Columnas eliminadas: {len(columnas_existentes_a_eliminar)} -> {', '.join(columnas_existentes_a_eliminar)}")
+                 df_procesado = df_procesado.drop(columns=columnas_existentes_a_eliminar)
+                 print(f"INFO: Columnas eliminadas: {len(columnas_existentes_a_eliminar)} -> {', '.join(columnas_existentes_a_eliminar)}")
             else:
-                print("INFO: No se encontraron columnas especificadas para eliminar (o ya fueron eliminadas/renombradas).")
+                 print("INFO: No se encontraron columnas especificadas para eliminar (o ya fueron eliminadas/renombradas).")
 
             # 4. Eliminación de duplicados (después de eliminar columnas irrelevantes)
             rows_before_duplicates = len(df_procesado)
@@ -119,15 +128,15 @@ class DataManager:
             rows_after_duplicates = len(df_procesado)
             duplicates_removed_count = rows_before_duplicates - rows_after_duplicates
             if duplicates_removed_count > 0:
-                print(f"INFO: {duplicates_removed_count} filas duplicadas eliminadas.")
+                 print(f"INFO: {duplicates_removed_count} filas duplicadas eliminadas.")
 
             # --- FIN PREPROCESAMIENTO ---
 
             if len(df_procesado) == 0:
-                self.processed_data = None
-                msg = "Error: Después del preprocesamiento, el DataFrame está vacío."
-                print(f"ERROR: {msg}")
-                return False, msg
+                 self.processed_data = None
+                 msg = "Error: Después del preprocesamiento, el DataFrame está vacío."
+                 print(f"ERROR: {msg}")
+                 return False, msg
 
             self.processed_data = df_procesado
             final_rows = len(self.processed_data)
@@ -155,6 +164,22 @@ class DataManager:
     def get_processed_data(self):
         """Devuelve el DataFrame preprocesado."""
         return self.processed_data
+
+    # Puedes añadir métodos aquí para usar self.upload_folder si es necesario, por ejemplo:
+    # def save_processed_data(self, filename="processed_output.csv"):
+    #     """Guarda los datos procesados en la carpeta de subida."""
+    #     if self.processed_data is not None:
+    #         output_path = os.path.join(self.upload_folder, filename)
+    #         try:
+    #             self.processed_data.to_csv(output_path, index=False)
+    #             print(f"SUCCESS: Datos procesados guardados en {output_path}")
+    #             return True, f"Datos guardados exitosamente en {filename}"
+    #         except Exception as e:
+    #             print(f"ERROR: No se pudieron guardar los datos procesados en {output_path}: {e}")
+    #             return False, f"Error al guardar datos: {e}"
+    #     else:
+    #         return False, "No hay datos procesados para guardar."
+
 
     def _get_dataframe_head_html(self, df, rows=5, table_id="dataframe-preview"):
         """Helper para convertir las primeras filas de un DF a HTML."""

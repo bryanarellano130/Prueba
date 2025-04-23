@@ -1,189 +1,308 @@
+# -*- coding: utf-8 -*-
 import os
 import io
 import base64
 import pandas as pd
 import numpy as np
 import matplotlib
-
-# Usar backend no interactivo ANTES de importar pyplot
+# Usar backend no interactivo ANTES de importar pyplot para evitar problemas en servidor
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 import datetime
 import traceback
 import uuid
+import json # Para manejar datos complejos en sesión o historial
+import joblib # Necesario para cargar modelos/scalers joblib
 
 # --- IMPORTACIONES PARA LOGIN Y BD ---
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, BooleanField, SubmitField
-from wtforms.validators import DataRequired, Length, Email, EqualTo, ValidationError
+from wtforms import StringField, PasswordField, BooleanField, SubmitField, SelectField, IntegerField, FloatField
+from wtforms.validators import DataRequired, Length, Email, EqualTo, ValidationError, NumberRange, Optional
 # Usar bcrypt directamente es más seguro que depender solo de Werkzeug para hash
 import bcrypt
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-# --- FIN IMPORTACIONES LOGIN Y BD ---
-
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, session, make_response, send_file
+# CORREGIDO: Importar url_parse de werkzeug.urls
+from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
-from reportlab.lib.pagesizes import letter
+from flask import Flask, render_template, redirect, url_for, flash, request, session, send_file, make_response
+
+# --- IMPORTACIONES PARA REPORTES ---
+from reportlab.lib.pagesizes import letter, landscape
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
 
-
-# Importa tus clases manager
+# --- IMPORTACIONES DE CLASES MANAGER (Asegúrate que estos archivos existan en la misma carpeta o PYTHONPATH) ---
+# Asumo que estas clases tienen los métodos llamados en app.py
+# Por ejemplo:
+# DataManager: __init__(upload_folder), load_csv_data(filepath) # <--- CORREGIDO aquí el nombre esperado
+# ThreatSimulator: __init__(temp_folder), run_simulation(...)
+# ThreatDetector: __init__(model=None, scaler=None, threshold=...),
+#                 detect_threats(filepath_or_df), is_model_loaded(), is_scaler_loaded(), get_config(), update_config(), get_model_info(), load_model(path), load_scaler(path)
+# AlertManager: __init__(), generate_alerts(detection_results), get_recent_alerts(), get_all_alerts()
+# AdminManager: __init__(detector_instance, model_folder), retrain_model()
 try:
     from data_manager import DataManager
     from threat_simulator import ThreatSimulator
     from threat_detector import ThreatDetector
     from alert_manager import AlertManager
-    from admin_manager import AdminManager
+    from admin_manager import AdminManager # Asegúrate de que esta clase esté en admin_manager.py
 except ImportError as e:
-    print(f"FATAL ERROR: No se pudo importar clase manager: {e}"); exit()
+    # Imprime un error más detallado si falla la importación
+    print(f"FATAL ERROR: No se pudo importar una clase manager: {e}")
+    print("Asegúrate de que los archivos .py (data_manager.py, threat_simulator.py, etc.)")
+    print("se encuentren en el mismo directorio que app.py o en el PYTHONPATH.")
+    exit()
 
-from functools import wraps 
-
+# --- DECORADOR PARA REQUERIR ROL DE ADMIN ---
+from functools import wraps
 print("DEBUG: Definiendo decorador admin_required...")
 def admin_required(f):
+    """
+    Decorador para restringir el acceso a rutas solo a usuarios administradores.
+    """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or not current_user.is_admin:
-            flash("Acceso no autorizado. Solo para administradores.", "error")
-            return redirect(url_for('dashboard')) # O url_for('login') si prefieres
+        if not current_user.is_authenticated:
+            flash("Debes iniciar sesión para acceder a esta página.", "warning")
+            return redirect(url_for('login', next=request.url))
+        if not current_user.is_admin:
+            flash("Acceso no autorizado. Esta sección es solo para administradores.", "danger")
+            return redirect(url_for('dashboard')) # O a donde quieras redirigir a no-admins
         return f(*args, **kwargs)
     return decorated_function
+print("DEBUG: Decorador admin_required definido.")
 
-# --- Configuración de la App ---
+# --- Configuración de la Aplicación Flask ---
 print("DEBUG: Creando instancia de Flask app...")
 app = Flask(__name__)
 print("DEBUG: Instancia Flask creada.")
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "d3v3l0pm3nt_s3cr3t_k3y_pl34s3_ch4ng3_v4") # Cambié un poco por si acaso
 
-# Carpetas
-UPLOAD_FOLDER = 'uploads'
-TEMP_SIM_FOLDER = 'temp_sim_data'
+# Clave secreta: MUY IMPORTANTE cambiarla en producción y guardarla de forma segura (ej. variable de entorno)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "d3v3l0pm3nt_s3cr3t_k3y_pl34s3_ch4ng3_th1s")
+
+# --- Configuración de Carpetas ---
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+TEMP_SIM_FOLDER = os.path.join(BASE_DIR, 'temp_sim_data')
+MODEL_FOLDER = os.path.join(BASE_DIR, 'modelo') # Carpeta para modelos guardados
+REPORT_FOLDER = os.path.join(BASE_DIR, 'reports') # Carpeta para guardar reportes generados
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['TEMP_SIM_FOLDER'] = TEMP_SIM_FOLDER
-app.config['ALLOWED_EXTENSIONS'] = {'csv'}
-print(f"DEBUG: Carpetas configuradas: UPLOAD={app.config['UPLOAD_FOLDER']}, TEMP_SIM={app.config['TEMP_SIM_FOLDER']}")
+app.config['MODEL_FOLDER'] = MODEL_FOLDER # Usamos 'modelo'
+app.config['REPORT_FOLDER'] = REPORT_FOLDER
+app.config['ALLOWED_EXTENSIONS'] = {'csv'} # Solo permitir archivos CSV por ahora
 
-# --- CONFIGURACIÓN DE BASE DE DATOS (¡¡¡AJUSTAR!!!) ---
-DB_USER = "root"
-DB_PASS = "" # Contraseña VACÍA por defecto en XAMPP. ¡CAMBIAR si pusiste una!
-DB_HOST = "localhost"
-DB_NAME = "cyber_db"
+# Asegurarse de que las carpetas existan
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['TEMP_SIM_FOLDER'], exist_ok=True)
+os.makedirs(app.config['MODEL_FOLDER'], exist_ok=True) # Crear carpeta 'modelo'
+os.makedirs(app.config['REPORT_FOLDER'], exist_ok=True)
+print(f"DEBUG: Carpetas configuradas y creadas si no existían.")
+
+# --- CONFIGURACIÓN DE BASE DE DATOS (MySQL con XAMPP por defecto) ---
+# ¡¡¡IMPORTANTE!!! Ajusta estos valores si tu configuración de MySQL es diferente.
+# Especialmente DB_PASS si le pusiste contraseña a root en XAMPP.
+DB_USER = os.environ.get("DB_USER", "root")
+DB_PASS = os.environ.get("DB_PASS", "") # Contraseña VACÍA por defecto en XAMPP
+DB_HOST = os.environ.get("DB_HOST", "localhost")
+DB_NAME = os.environ.get("DB_NAME", "cyber_db") # Asegúrate que esta BD exista en tu MySQL
+
+# Usar mysqlconnector (pip install mysql-connector-python)
 db_uri = f'mysql+mysqlconnector://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}'
-print(f"DEBUG: Configurando URI de BD: {db_uri[:db_uri.find('@')+1]}********")
+print(f"DEBUG: Configurando URI de BD: mysql+mysqlconnector://{DB_USER}:******@{DB_HOST}/{DB_NAME}")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ECHO'] = False
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False # Recomendado desactivar
+app.config['SQLALCHEMY_ECHO'] = False # Poner True para ver las queries SQL (útil para debug)
 
 # --- INICIALIZACIÓN DE EXTENSIONES ---
 print("DEBUG: Inicializando SQLAlchemy...")
-try: db = SQLAlchemy(app); print("DEBUG: SQLAlchemy inicializado.")
-except Exception as e_sql: print(f"FATAL ERROR: Inicializando SQLAlchemy: {e_sql}"); exit()
+try:
+    db = SQLAlchemy(app)
+    print("DEBUG: SQLAlchemy inicializado.")
+except Exception as e_sql:
+    print(f"FATAL ERROR: Inicializando SQLAlchemy: {e_sql}")
+    print("Verifica la cadena de conexión y que el servidor MySQL esté corriendo.")
+    exit()
 
 print("DEBUG: Inicializando LoginManager...")
-try: login_manager = LoginManager(app); print(f"DEBUG: LoginManager instanciado: {login_manager}"); login_manager.login_view = 'login'; login_manager.login_message = "Por favor, inicia sesión."; login_manager.login_message_category = "info"; print("DEBUG: Configuración LoginManager completa.")
-except Exception as e_login: print(f"FATAL ERROR: Inicializando LoginManager: {e_login}"); exit()
-# --- FIN INICIALIZACIÓN ---
+try:
+    login_manager = LoginManager(app)
+    login_manager.login_view = 'login' # Ruta a la que redirigir si se necesita login
+    login_manager.login_message = "Por favor, inicia sesión para acceder a esta página."
+    login_manager.login_message_category = "info" # Categoría de mensaje flash
+    print("DEBUG: Configuración LoginManager completa.")
+except Exception as e_login:
+    print(f"FATAL ERROR: Inicializando LoginManager: {e_login}")
+    exit()
 
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(app.config['TEMP_SIM_FOLDER'], exist_ok=True)
+# --- Instancias Globales de los Managers ---
+# (Se inicializan aquí para que estén disponibles en toda la app)
+print("DEBUG: Inicializando Managers...")
+try:
+    data_manager = DataManager(upload_folder=app.config['UPLOAD_FOLDER'])
 
-# --- Instancias Globales (Managers) ---
-def allowed_file(filename):
-    """Verifica si la extensión del archivo está permitida."""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
-try: print("DEBUG: Inicializando Managers..."); data_manager = DataManager(); simulator = ThreatSimulator(); alert_manager = AlertManager(); model_file_path = None; detector = ThreatDetector(model_path=model_file_path); admin_manager = AdminManager(detector_instance=detector); print("DEBUG: Managers inicializados.")
-except Exception as e: print(f"FATAL ERROR inicializando manager: {e}\n{traceback.format_exc()}"); exit()
+    # --- Carga del Modelo y Scaler ---
+    # Rutas esperadas para los archivos guardados por data_model.py
+    model_path = os.path.join(app.config['MODEL_FOLDER'], 'modelo_glm.joblib')
+    scaler_path = os.path.join(app.config['MODEL_FOLDER'], 'scaler.joblib')
 
-detection_history = []
+    # Intentar cargar el scaler y el modelo
+    loaded_scaler = None
+    loaded_model = None
+    print(f"DEBUG: Intentando cargar scaler desde: {scaler_path}")
+    if os.path.exists(scaler_path):
+        try:
+            loaded_scaler = joblib.load(scaler_path)
+            print("INFO: Scaler cargado exitosamente.")
+        except Exception as e:
+            print(f"ERROR: No se pudo cargar el scaler desde '{scaler_path}': {e}")
+            loaded_scaler = None # Asegurarse de que sea None si falla
+    else:
+        print(f"WARN: Archivo de scaler NO encontrado en '{scaler_path}'") # Cambiado a WARN
+
+    print(f"DEBUG: Intentando cargar modelo desde: {model_path}")
+    if os.path.exists(model_path):
+        try:
+            loaded_model = joblib.load(model_path)
+            print("INFO: Modelo cargado exitosamente.")
+        except Exception as e:
+            print(f"ERROR: No se pudo cargar el modelo desde '{model_path}': {e}")
+            loaded_model = None # Asegurarse de que sea None si falla
+    else:
+        print(f"WARN: Archivo de modelo NO encontrado en '{model_path}'") # Cambiado a WARN
+
+    # Inicializar ThreatDetector pasando el modelo y scaler cargados (pueden ser None)
+    # Asumo que ThreatDetector.__init__ maneja None para model y scaler
+    detector = ThreatDetector(model=loaded_model, scaler=loaded_scaler)
+
+    # Pasar instancia del detector y la carpeta del modelo al AdminManager
+    admin_manager = AdminManager(detector_instance=detector, model_folder=app.config['MODEL_FOLDER'])
+
+    # Otros managers
+    simulator = ThreatSimulator(temp_folder=app.config['TEMP_SIM_FOLDER'])
+    alert_manager = AlertManager() # Podría necesitar configuración de BD o archivo
+
+    print("DEBUG: Managers inicializados.")
+except Exception as e:
+    print(f"FATAL ERROR inicializando manager: {e}\n{traceback.format_exc()}")
+    exit()
+
+# --- Almacenamiento Temporal de Resultados (Considerar mover a BD para persistencia) ---
+# Usaremos la sesión de Flask para almacenar temporalmente info del último análisis
+# session['last_analysis'] = {'data_info': {...}, 'detection_results': {...}, 'simulation_results': {...}}
 
 # --- MODELO DE BASE DE DATOS (USUARIO) ---
 print("DEBUG: Definiendo modelo User...")
 class User(db.Model, UserMixin):
-    __tablename__ = 'users'
+    __tablename__ = 'users' # Nombre explícito de la tabla
     id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(60), nullable=False) # Bcrypt hash tiene 60 chars
-    is_admin = db.Column(db.Boolean, default=False)
+    username = db.Column(db.String(80), unique=True, nullable=False, index=True) # Index para búsquedas rápidas
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True) # Index para búsquedas rápidas
+    # Aumentar longitud si usas algoritmos de hash más largos en el futuro
+    # bcrypt genera hashes de 60 caracteres
+    password_hash = db.Column(db.String(60), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    
+    last_login = db.Column(db.DateTime, nullable=True)
 
-    # --- MÉTODO set_password (CORRECTAMENTE FORMATEADO) ---
     def set_password(self, password):
-        """Hashea la contraseña y la guarda."""
+        """Hashea la contraseña usando bcrypt y la guarda."""
         password_bytes = password.encode('utf-8')
+        # gensalt() genera un salt único para cada contraseña
         salt = bcrypt.gensalt()
         self.password_hash = bcrypt.hashpw(password_bytes, salt).decode('utf-8')
-        
 
-    # --- MÉTODO check_password (CORRECTAMENTE FORMATEADO) ---
     def check_password(self, password):
         """Verifica una contraseña contra el hash guardado."""
-        # Comprobar primero si hay hash guardado
         if not self.password_hash:
-             return False
+            return False # No hay hash guardado
         try:
             password_bytes = password.encode('utf-8')
             stored_hash_bytes = self.password_hash.encode('utf-8')
             return bcrypt.checkpw(password_bytes, stored_hash_bytes)
         except Exception as e:
-             # Loggear el error es importante en producción
-             print(f"ERROR verificando password para user {self.id}: {e}")
-             return False # Ser cauto y devolver False si hay error
+            # Loggear el error es importante en producción
+            print(f"ERROR verificando password para user {self.id}: {e}")
+            return False # Ser cauto y devolver False si hay error
 
     def __repr__(self):
-        return f'<User {self.username}>'
+        # Representación útil para debugging
+        return f'<User id={self.id} username={self.username} email={self.email} admin={self.is_admin}>'
 print("DEBUG: Modelo User definido.")
 
 # --- Flask-Login User Loader ---
 @login_manager.user_loader
 def load_user(user_id):
-    try: return User.query.get(int(user_id))
-    except Exception as e: print(f"Error cargando user_id {user_id}: {e}"); return None
+    """Función requerida por Flask-Login para cargar un usuario desde la sesión."""
+    try:
+        # Intenta obtener el usuario por ID. Retorna None si no existe.
+        return User.query.get(int(user_id))
+    except Exception as e:
+        print(f"Error en user_loader para user_id {user_id}: {e}")
+        return None # Importante retornar None si hay error o no se encuentra
 
 # --- FORMULARIOS (Flask-WTF) ---
 print("DEBUG: Definiendo Formularios...")
-class LoginForm(FlaskForm): username = StringField('Usuario', validators=[DataRequired(), Length(min=3, max=80)]); password = PasswordField('Contraseña', validators=[DataRequired()]); remember_me = BooleanField('Recuérdame'); submit = SubmitField('Iniciar Sesión')
-class RegistrationForm(FlaskForm): username = StringField('Usuario', validators=[DataRequired(), Length(min=3, max=80)]); email = StringField('Email', validators=[DataRequired(), Email()]); password = PasswordField('Contraseña', validators=[DataRequired(), Length(min=6)]); confirm_password = PasswordField('Confirmar Contraseña', validators=[DataRequired(), EqualTo('password', message='Las contraseñas no coinciden.')]); submit = SubmitField('Registrarse')
-def validate_username(self, username):
-        if User.query.filter_by(username=username.data).first(): raise ValidationError('Usuario ya existe.')
-        def validate_email(self, email):
-            if User.query.filter_by(email=email.data).first(): raise ValidationError('Email ya registrado.')
-print("DEBUG: Formularios definidos.")
+class LoginForm(FlaskForm):
+    """Formulario de inicio de sesión."""
+    username = StringField('Usuario', validators=[DataRequired("El nombre de usuario es obligatorio."), Length(min=3, max=80)])
+    password = PasswordField('Contraseña', validators=[DataRequired("La contraseña es obligatoria.")])
+    remember_me = BooleanField('Recuérdame')
+    submit = SubmitField('Iniciar Sesión')
 
-print("DEBUG: Definiendo Formularios Admin User...")
+class RegistrationForm(FlaskForm):
+    """Formulario de registro de nuevos usuarios."""
+    username = StringField('Usuario', validators=[DataRequired(), Length(min=3, max=80)])
+    email = StringField('Email', validators=[DataRequired(), Email("Introduce una dirección de email válida.")])
+    password = PasswordField('Contraseña', validators=[DataRequired(), Length(min=6, message="La contraseña debe tener al menos 6 caracteres.")])
+    confirm_password = PasswordField('Confirmar Contraseña',
+                                     validators=[DataRequired(),
+                                                 EqualTo('password', message='Las contraseñas no coinciden.')])
+    submit = SubmitField('Registrarse')
+
+    # Validadores personalizados para asegurar unicidad
+    def validate_username(self, username):
+        """Verifica si el nombre de usuario ya existe."""
+        user = User.query.filter_by(username=username.data).first()
+        if user:
+            raise ValidationError('Este nombre de usuario ya está en uso. Por favor, elige otro.')
+
+    def validate_email(self, email):
+        """Verifica si el email ya está registrado."""
+        user = User.query.filter_by(email=email.data).first()
+        if user:
+            raise ValidationError('Este email ya está registrado. Por favor, usa otro.')
 
 class UserAdminForm(FlaskForm):
-    """Formulario base para Crear y Editar usuarios desde el panel Admin."""
+    """Formulario para Crear y Editar usuarios desde el panel Admin."""
     username = StringField('Usuario', validators=[DataRequired(), Length(min=3, max=80)])
     email = StringField('Email', validators=[DataRequired(), Email()])
     # La contraseña es opcional al editar, solo necesaria para crear o cambiar
-    password = PasswordField('Contraseña (dejar vacío para no cambiar)')
+    # Usar Optional() para que no sea requerido si está vacío
+    password = PasswordField('Contraseña (dejar vacío para no cambiar)', validators=[Optional(), Length(min=6)])
     is_admin = BooleanField('Es Administrador')
     submit = SubmitField('Guardar Usuario')
 
-    # Validadores personalizados para verificar unicidad de username y email
-    # Se llamarán automáticamente si el campo tiene un validador con el mismo nombre
+    # Guardamos el usuario original para comparar en validaciones
     def __init__(self, original_username=None, original_email=None, *args, **kwargs):
         super(UserAdminForm, self).__init__(*args, **kwargs)
         self.original_username = original_username
         self.original_email = original_email
 
     def validate_username(self, username):
-        # Solo validar si el username ha cambiado
+        # Solo validar si el username ha cambiado O si es un usuario nuevo (original_username es None)
         if username.data != self.original_username:
             user = User.query.filter_by(username=username.data).first()
             if user:
                 raise ValidationError('Este nombre de usuario ya está en uso.')
 
     def validate_email(self, email):
-        # Solo validar si el email ha cambiado
+        # Solo validar si el email ha cambiado O si es un usuario nuevo (original_email es None)
         if email.data != self.original_email:
             user = User.query.filter_by(email=email.data).first()
             if user:
@@ -191,967 +310,1255 @@ class UserAdminForm(FlaskForm):
 
 class DeleteUserForm(FlaskForm):
     """Formulario simple para confirmar la eliminación de un usuario."""
-    submit = SubmitField('Eliminar Usuario')
+    submit = SubmitField('Confirmar Eliminación')
 
-print("DEBUG: Formularios Admin User definidos.")
+# --- Formularios para Simulación y Configuración ---
+class SimulationForm(FlaskForm):
+    """Formulario para configurar la simulación de ataques."""
+    attack_type = SelectField('Tipo de Ataque', choices=[ # Añade aquí los tipos de ataque que soporta tu simulador
+        ('DoS', 'Denegación de Servicio (DoS)'),
+        ('PortScan', 'Escaneo de Puertos'),
+        ('BruteForce', 'Fuerza Bruta (SSH/FTP)'),
+        # ... otros tipos ...
+    ], validators=[DataRequired()])
+    target_ip = StringField('IP Objetivo (Opcional)', validators=[Optional()]) # O hacerlo requerido si siempre se necesita
+    duration = IntegerField('Duración (segundos)', default=60, validators=[DataRequired(), NumberRange(min=10, max=3600)])
+    intensity = SelectField('Intensidad', choices=[('low', 'Baja'), ('medium', 'Media'), ('high', 'Alta')], default='medium')
+    submit = SubmitField('Iniciar Simulación')
 
-# --- Context Processor ---
-@app.context_processor
-def inject_current_year(): return {'current_year': datetime.datetime.now().year}
+class ModelConfigForm(FlaskForm):
+    """Formulario para configurar parámetros del modelo (ej. umbral)."""
+    # Ajusta los parámetros según lo que tu ThreatDetector permita configurar
+    detection_threshold = FloatField('Umbral de Detección', default=0.5, validators=[DataRequired(), NumberRange(min=0.0, max=1.0)])
+    # Podrías añadir más campos aquí si el modelo tiene otros hiperparámetros ajustables en tiempo real
+    submit = SubmitField('Actualizar Configuración')
+print("DEBUG: Formularios definidos.")
 
-# --- Filtro Jinja2 para Fechas ---
-@app.template_filter('format_datetime')
-def format_datetime_filter(iso_string, format='%Y-%m-%d %H:%M:%S'):
-    if not iso_string: return "N/A";
-    try: dt = datetime.datetime.fromisoformat(iso_string); return dt.strftime(format);
-    except: return iso_string
-    
-    print("DEBUG: Definiendo funciones de reporte...")
+# --- Funciones Auxiliares ---
+def allowed_file(filename):
+    """Verifica si la extensión del archivo está permitida."""
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-def generate_last_detection_csv(detection_results):
-    """Genera el contenido CSV para los últimos resultados de detección."""
-    if not detection_results:
-        return None
-
-    output = io.StringIO()
-
-    # Añadir información de resumen
-    output.write("Reporte de Última Detección\n")
-    output.write(f"Timestamp: {detection_results.get('timestamp', 'N/A')}\n")
-    output.write(f"Fuente de Datos: {detection_results.get('source_info', 'N/A')}\n")
-    output.write(f"Filas Analizadas: {detection_results.get('rows_analyzed', 'N/A')}\n")
-    output.write(f"Umbral del Modelo: {detection_results.get('model_threshold', 'N/A')}\n\n")
-
-    # Añadir métricas
-    metrics = detection_results.get('metrics', {})
-    if metrics:
-        output.write("Métricas del Modelo:\n")
-        # Intenta añadir métricas simples como accuracy, precisión, etc.
-        simple_metrics = {k: v for k, v in metrics.items() if not isinstance(v, (dict, list))}
-        for name, value in simple_metrics.items():
-            output.write(f"{name.replace('_', ' ').title()},{value}\n")
-
-        # Manejar reporte de clasificación si está presente
-        classification_report = metrics.get('report', {})
-        if classification_report and isinstance(classification_report, dict):
-             output.write("\nReporte de Clasificación:\n")
-             try:
-                 # Convertir el diccionario del reporte a DataFrame de pandas
-                 # Asumimos que el reporte tiene la estructura { 'clase': { 'metricas' }, ... }
-                 report_df = pd.DataFrame(classification_report).transpose()
-                 # Escribir el DataFrame a CSV, incluyendo el índice (las clases)
-                 report_df.to_csv(output, index=True, header=True)
-             except Exception as e:
-                 output.write(f"Error al formatear reporte de clasificación en CSV: {e}\n")
-
-    # Añadir resumen de detecciones (conteo por etiqueta)
-    summary = detection_results.get('detection_summary', {})
-    if summary:
-        output.write("\nResumen de Detecciones:\n")
-        output.write("Etiqueta,Cantidad\n")
-        for label, count in summary.items():
-            output.write(f"{label},{count}\n")
-
-    # Añadir vista previa de datos (primeras 100 filas)
-    data_head_records = detection_results.get('data_head', [])
-    if data_head_records:
-        output.write("\nVista Previa de Datos (Primeras 100 filas):\n")
-        try:
-            # Crear DataFrame desde la lista de diccionarios
-            data_head_df = pd.DataFrame(data_head_records)
-            # Escribir el DataFrame a CSV, sin el índice numérico de pandas
-            data_head_df.to_csv(output, index=False)
-        except Exception as e:
-            output.write(f"Error al formatear vista previa de datos en CSV: {e}\n")
-
-    output.seek(0) # Volver al inicio del objeto StringIO
-    return output.getvalue() # Retornar el contenido como string
-
-print("DEBUG: Funciones de reporte definidas.")
-
-# --- Helper para Gráficos ---
 def generate_plot_base64(plot_function, *args, **kwargs):
-    """Ejecuta una función de ploteo y devuelve la imagen como base64."""
-    # Nivel 1 de indentación (dentro de la función)
+    """
+    Ejecuta una función de ploteo de matplotlib y devuelve la imagen como string base64.
+    La función de ploteo debe aceptar 'fig' como argumento.
+    """
     img = io.BytesIO()
     fig = None # Para asegurar que cerramos la figura
     try:
-        # Nivel 2 de indentación (dentro de try)
-        fig = plt.figure(figsize=kwargs.pop('figsize', (5, 4))) # Permitir pasar figsize
-        plot_function(fig=fig, *args, **kwargs) # Pasar figura a la función de ploteo
-        plt.savefig(img, format='png', bbox_inches='tight') # Guardar en buffer
-        img.seek(0)
-        plot_url = base64.b64encode(img.getvalue()).decode('utf8') # Codificar
+        # Crear figura con tamaño personalizable
+        fig = plt.figure(figsize=kwargs.pop('figsize', (6, 4))) # Tamaño por defecto
+        # Llamar a la función que dibuja en la figura
+        plot_function(fig=fig, *args, **kwargs)
+        # Guardar la figura en el buffer de memoria
+        plt.savefig(img, format='png', bbox_inches='tight') # bbox_inches='tight' ajusta el padding
+        img.seek(0) # Rebobinar el buffer
+        # Codificar en base64 y decodificar a utf8 para string HTML
+        plot_url = base64.b64encode(img.getvalue()).decode('utf8')
         return f"data:image/png;base64,{plot_url}"
     except Exception as e:
-        # Nivel 2 de indentación (dentro de except)
         print(f"Error generando gráfico: {e}\n{traceback.format_exc()}")
-        return None
+        return None # Retornar None si falla la generación
     finally:
-        # Nivel 2 de indentación (dentro de finally)
         # Asegurar que la figura se cierra siempre para liberar memoria
         if fig:
-            # Nivel 3 de indentación (dentro de if)
             plt.close(fig)
-# --- Fin de la función ---
-# --- Rutas de Flask ---
-print("DEBUG: Definiendo rutas Flask...")
 
-print("DEBUG: Definiendo funciones de gráficos...")
-
-# Asegúrate de que generate_plot_base64 esté definida antes de esta función si la pones después
-
-def plot_confusion_matrix_func(cm, fig, classes=['BENIGN', 'ATTACK'], title='Matriz de Confusión'):
-    """
-    Genera un plot de la matriz de confusión en la figura de matplotlib proporcionada.
-    Args:
-        cm (list or np.array): La matriz de confusión (ej: [[TN, FP], [FN, TP]]).
-        fig (matplotlib.figure.Figure): La figura de matplotlib donde dibujar.
-        classes (list): Lista de nombres de clases (ej: ['BENIGN', 'ATTACK']).
-        title (str): Título del plot.
-    """
+def plot_confusion_matrix_func(fig, cm, classes, title='Matriz de Confusión'):
+    """Dibuja una matriz de confusión en una figura matplotlib dada."""
     try:
-        ax = fig.add_subplot(111) # Añadir un subplot a la figura
-        # Asegurarse de que cm es un numpy array para seaborn si no lo es ya
-        cm_array = np.array(cm)
-        sns.heatmap(cm_array, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
-
-        # Etiquetas y título
-        ax.set_xlabel('Predicción')
-        ax.set_ylabel('Valor Real')
-        ax.set_title(title)
-        ax.xaxis.set_ticklabels(classes)
-        ax.yaxis.set_ticklabels(classes)
-
-        # Asegurar que las etiquetas no se corten
-        plt.tight_layout()
-
+        ax = fig.add_subplot(111) # Añadir ejes a la figura
+        cm_array = np.array(cm) # Asegurar que es un array numpy
+        sns.heatmap(cm_array, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=True, # Mostrar barra de color
+                    xticklabels=classes, yticklabels=classes, annot_kws={"size": 12}) # Ajustar tamaño de números
+        ax.set_xlabel('Etiqueta Predicha', fontsize=12)
+        ax.set_ylabel('Etiqueta Verdadera', fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        plt.xticks(rotation=45, ha='right') # Rotar etiquetas eje X si son largas
+        plt.yticks(rotation=0)
+        plt.tight_layout() # Ajustar layout
     except Exception as e:
         print(f"Error en plot_confusion_matrix_func: {e}\n{traceback.format_exc()}")
-        # Puedes añadir un mensaje de error en el plot si quieres, por ejemplo:
-        # fig.text(0.5, 0.5, f'Error generando plot:\n{e}', horizontalalignment='center', verticalalignment='center', color='red', fontsize=10)
+        # Opcional: Añadir texto de error a la figura si falla
+        fig.text(0.5, 0.5, f'Error al generar matriz:\n{e}', ha='center', va='center', color='red')
 
+def plot_feature_distribution_func(fig, df, feature_name):
+    """Dibuja la distribución de una característica (feature) en una figura."""
+    try:
+        ax = fig.add_subplot(111)
+        if pd.api.types.is_numeric_dtype(df[feature_name]):
+            sns.histplot(df[feature_name], kde=True, ax=ax)
+            ax.set_title(f'Distribución de {feature_name}', fontsize=14, fontweight='bold')
+        else: # Asumir categórica/objeto
+            # Limitar número de categorías a mostrar si son muchas
+            top_categories = df[feature_name].value_counts().nlargest(15).index
+            sns.countplot(y=feature_name, data=df, order=top_categories, ax=ax, palette='viridis')
+            ax.set_title(f'Conteo de {feature_name} (Top 15)', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Valor' if pd.api.types.is_numeric_dtype(df[feature_name]) else 'Conteo', fontsize=12)
+        ax.set_ylabel(feature_name, fontsize=12)
+        plt.tight_layout()
+    except KeyError:
+        print(f"Error: La característica '{feature_name}' no existe en el DataFrame.")
+        fig.text(0.5, 0.5, f"Error: Característica\n'{feature_name}'\nno encontrada.", ha='center', va='center', color='red')
+    except Exception as e:
+        print(f"Error en plot_feature_distribution_func para {feature_name}: {e}\n{traceback.format_exc()}")
+        fig.text(0.5, 0.5, f'Error al generar gráfico\npara {feature_name}:\n{e}', ha='center', va='center', color='red')
 
-print("DEBUG: Funciones de gráficos definidas.")
+# --- Funciones para Generar Reportes ---
+def generate_detection_report_pdf(report_data, output_filename):
+    """Genera un reporte PDF con los resultados de la detección."""
+    doc = SimpleDocTemplate(output_filename, pagesize=landscape(letter)) # Usar landscape para más espacio
+    styles = getSampleStyleSheet()
+    story = []
 
-# --- RUTAS DE AUTENTICACIÓN ---
+    # --- Título ---
+    title = "Reporte de Detección de Amenazas"
+    story.append(Paragraph(title, styles['h1']))
+    story.append(Spacer(1, 0.2*inch))
+
+    # --- Información General ---
+    story.append(Paragraph("Información General", styles['h2']))
+    info_data = [
+        ['Timestamp:', report_data.get('timestamp', 'N/A')],
+        ['Fuente de Datos:', report_data.get('source_info', 'N/A')],
+        ['Filas Analizadas:', str(report_data.get('rows_analyzed', 'N/A'))],
+        ['Modelo Utilizado:', report_data.get('model_info', 'N/A')],
+        ['Umbral de Detección:', str(report_data.get('model_threshold', 'N/A'))]
+    ]
+    info_table = Table(info_data, colWidths=[1.5*inch, 6*inch])
+    info_table.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), # Columna de etiquetas en negrita
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 0.2*inch))
+
+    # --- Resumen de Detecciones ---
+    summary = report_data.get('detection_summary', {})
+    if summary:
+        story.append(Paragraph("Resumen de Detecciones", styles['h2']))
+        summary_data = [['Etiqueta', 'Cantidad']]
+        for label, count in summary.items():
+            summary_data.append([label, str(count)])
+
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.grey), # Encabezado gris
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), # Encabezado en negrita
+            ('BOTTOMPADDING', (0,0), (-1,0), 12),
+            ('BACKGROUND', (0,1), (-1,-1), colors.beige), # Filas de datos con fondo
+            ('GRID', (0,0), (-1,-1), 1, colors.black) # Rejilla
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 0.2*inch))
+
+    # --- Métricas de Evaluación ---
+    metrics = report_data.get('metrics', {})
+    if metrics:
+        story.append(Paragraph("Métricas de Evaluación del Modelo", styles['h2']))
+        metrics_data = [['Métrica', 'Valor']]
+        # Añadir métricas principales si existen
+        for m_name in ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc']:
+            if m_name in metrics:
+                # Formatear a 4 decimales si es float
+                value = metrics[m_name]
+                metrics_data.append([m_name.replace('_', ' ').title(), f"{value:.4f}" if isinstance(value, float) else str(value)])
+
+        metrics_table = Table(metrics_data, colWidths=[2*inch, 2*inch])
+        metrics_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.darkblue),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0,0), (-1,0), 12),
+            ('GRID', (0,0), (-1,-1), 1, colors.black)
+        ]))
+        story.append(metrics_table)
+        story.append(Spacer(1, 0.1*inch))
+
+        # --- Matriz de Confusión (si existe y es un plot base64) ---
+        cm_plot_b64 = metrics.get('confusion_matrix_plot')
+        if cm_plot_b64 and cm_plot_b64.startswith('data:image/png;base64,'):
+            try:
+                cm_img_data = base64.b64decode(cm_plot_b64.split(',')[1])
+                cm_img = Image(io.BytesIO(cm_img_data), width=4*inch, height=3*inch) # Ajustar tamaño según necesidad
+                story.append(cm_img)
+                story.append(Spacer(1, 0.2*inch))
+            except Exception as e_img:
+                print(f"Error al añadir imagen de matriz de confusión al PDF: {e_img}")
+                story.append(Paragraph(f"Error al mostrar Matriz de Confusión: {e_img}", styles['Italic']))
+
+        # --- Reporte de Clasificación (si existe) ---
+        class_report = metrics.get('report', {})
+        if class_report and isinstance(class_report, dict):
+            story.append(Paragraph("Reporte de Clasificación Detallado", styles['h3']))
+             # Convertir el dict a formato tabla para ReportLab
+             # Asume que las claves son nombres de clases y los valores son dicts de métricas
+            report_list = [['Clase', 'Precision', 'Recall', 'F1-Score', 'Support']]
+            for class_name, class_metrics in class_report.items():
+                 if isinstance(class_metrics, dict): # Asegurar que es un dict
+                      # Formatear métricas a 3 decimales
+                      p = f"{class_metrics.get('precision', 'N/A'):.3f}" if isinstance(class_metrics.get('precision'), float) else str(class_metrics.get('precision', 'N/A'))
+                      r = f"{class_metrics.get('recall', 'N/A'):.3f}" if isinstance(class_metrics.get('recall'), float) else str(class_metrics.get('recall', 'N/A'))
+                      f1 = f"{class_metrics.get('f1-score', 'N/A'):.3f}" if isinstance(class_metrics.get('f1-score'), float) else str(class_metrics.get('f1-score', 'N/A'))
+                      s = str(class_metrics.get('support', 'N/A'))
+                      report_list.append([class_name, p, r, f1, s])
+
+            report_table = Table(report_list, colWidths=[1.5*inch, 1.2*inch, 1.2*inch, 1.2*inch, 1.2*inch])
+            report_table.setStyle(TableStyle([
+                 ('BACKGROUND', (0,0), (-1,0), colors.teal),
+                 ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                 ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                 ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                 ('BOTTOMPADDING', (0,0), (-1,0), 10),
+                 ('GRID', (0,0), (-1,-1), 1, colors.black)
+            ]))
+            story.append(report_table)
+            story.append(Spacer(1, 0.2*inch))
+
+    # --- Vista Previa de Datos (Primeras filas con predicción) ---
+    data_head = report_data.get('data_head', [])
+    if data_head:
+        story.append(PageBreak()) # Nueva página para la tabla de datos
+        story.append(Paragraph("Vista Previa de Datos Detectados (Primeras Filas)", styles['h2']))
+        # Convertir lista de dicts a lista de listas para ReportLab Table
+        if isinstance(data_head, list) and len(data_head) > 0 and isinstance(data_head[0], dict):
+            headers = list(data_head[0].keys())
+            data_list = [headers] + [[str(row.get(h, '')) for h in headers] for row in data_head]
+
+            # Ajustar anchos de columna (esto es aproximado, puede requerir ajuste)
+            num_cols = len(headers)
+            available_width = 9.5 * inch # Ancho aprox en landscape letter menos márgenes
+            col_width = available_width / num_cols
+            col_widths = [col_width] * num_cols
+
+            data_table = Table(data_list, colWidths=col_widths)
+            data_table.setStyle(TableStyle([
+                 ('BACKGROUND', (0,0), (-1,0), colors.darkgrey),
+                 ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                 ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                 ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                 ('FONTSIZE', (0,0), (-1,-1), 8), # Tamaño de fuente más pequeño para tablas grandes
+                 ('BOTTOMPADDING', (0,0), (-1,0), 8),
+                 ('TOPPADDING', (0,1), (-1,-1), 4),
+                 ('BOTTOMPADDING', (0,1), (-1,-1), 4),
+                 ('GRID', (0,0), (-1,-1), 0.5, colors.lightgrey)
+            ]))
+            story.append(data_table)
+        else:
+             story.append(Paragraph("Formato de datos de vista previa no válido.", styles['Italic']))
+
+    # --- Construir el PDF ---
+    try:
+        doc.build(story)
+        print(f"Reporte PDF generado: {output_filename}")
+        return True
+    except Exception as e:
+        print(f"Error al construir el PDF: {e}\n{traceback.format_exc()}")
+        return False
+
+def generate_detection_report_csv(report_data):
+    """Genera el contenido CSV para los resultados de la detección."""
+    if not report_data: return None
+    output = io.StringIO()
+
+    # Escribir metadatos
+    output.write(f"Reporte de Detección de Amenazas\n")
+    output.write(f"Timestamp,{report_data.get('timestamp', 'N/A')}\n")
+    output.write(f"Fuente de Datos,{report_data.get('source_info', 'N/A')}\n")
+    output.write(f"Filas Analizadas,{report_data.get('rows_analyzed', 'N/A')}\n")
+    output.write(f"Modelo Utilizado,{report_data.get('model_info', 'N/A')}\n")
+    output.write(f"Umbral de Detección,{report_data.get('model_threshold', 'N/A')}\n\n")
+
+    # Escribir resumen
+    summary = report_data.get('detection_summary', {})
+    if summary:
+        output.write("Resumen de Detecciones\n")
+        output.write("Etiqueta,Cantidad\n")
+        for label, count in summary.items():
+            output.write(f"{label},{count}\n")
+        output.write("\n")
+
+    # Escribir métricas
+    metrics = report_data.get('metrics', {})
+    if metrics:
+        output.write("Métricas de Evaluación\n")
+        output.write("Métrica,Valor\n")
+        for m_name in ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc']:
+             if m_name in metrics:
+                 value = metrics[m_name]
+                 output.write(f"{m_name.replace('_', ' ').title()},{value:.4f}" if isinstance(value, float) else f"{m_name.replace('_', ' ').title()},{value}\n")
+
+        # Reporte de clasificación si existe
+        class_report = metrics.get('report', {})
+        if class_report and isinstance(class_report, dict):
+             output.write("\nReporte de Clasificación Detallado\n")
+             try:
+                 # Usar Pandas para convertir el dict a CSV fácilmente
+                 report_df = pd.DataFrame(class_report).transpose()
+                 report_df.index.name = 'Clase' # Nombrar la columna del índice
+                 report_df.to_csv(output, mode='a', header=True, index=True) # mode='a' para añadir al StringIO
+             except Exception as e_rep:
+                 output.write(f"Error al formatear reporte de clasificación,{e_rep}\n")
+        output.write("\n")
+
+    # Escribir vista previa de datos
+    data_head = report_data.get('data_head', [])
+    if data_head:
+        output.write("Vista Previa de Datos Detectados (Primeras Filas)\n")
+        if isinstance(data_head, list) and len(data_head) > 0 and isinstance(data_head[0], dict):
+            try:
+                df_head = pd.DataFrame(data_head)
+                df_head.to_csv(output, mode='a', header=True, index=False) # Añadir al StringIO sin índice de pandas
+            except Exception as e_data:
+                output.write(f"Error al formatear vista previa de datos,{e_data}\n")
+        else:
+             output.write("Formato de datos de vista previa no válido.\n")
+
+    output.seek(0) # Rebobinar para leer desde el principio
+    return output.getvalue() # Devolver como string
+
+# --- Context Processor (Variables globales para plantillas Jinja2) ---
+@app.context_processor
+def inject_global_vars():
+    """Injecta variables globales en el contexto de las plantillas."""
+    return {
+        'current_year': datetime.datetime.now().year,
+        'app_name': "Sistema de Detección de Amenazas", # Nombre de tu aplicación
+        'is_admin': current_user.is_authenticated and current_user.is_admin # Flag para mostrar/ocultar elementos de admin
+    }
+
+# --- Filtro Jinja2 para Fechas ---
+@app.template_filter('format_datetime')
+def format_datetime_filter(dt_obj, format='%Y-%m-%d %H:%M:%S'):
+    """Formatea un objeto datetime en Jinja2. Maneja None."""
+    if isinstance(dt_obj, datetime.datetime):
+        return dt_obj.strftime(format)
+    elif isinstance(dt_obj, str): # Intentar parsear si es string ISO
+        try:
+            # Usar parse para manejar diferentes formatos ISO, o fromisoformat si sabes que es exacto
+            dt_obj_parsed = datetime.datetime.fromisoformat(dt_obj)
+            return dt_obj_parsed.strftime(format)
+        except (ValueError, TypeError):
+             # Si no es ISO, intenta otros formatos comunes o devuelve original
+             try:
+                 # Ejemplo: intentar formato con zona horaria Z
+                 dt_obj_parsed = datetime.datetime.strptime(dt_obj, '%Y-%m-%dT%H:%M:%S.%fZ')
+                 return dt_obj_parsed.strftime(format)
+             except (ValueError, TypeError):
+                 return dt_obj # Devolver string original si no se puede parsear
+    return "N/A" # Devolver N/A si es None u otro tipo
+
+# --- RUTAS DE FLASK ---
+print("DEBUG: Definiendo rutas Flask...")
+
+# --- Rutas de Autenticación ---
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    # Redirigir si ya está autenticado
+    """Maneja el inicio de sesión del usuario."""
     if current_user.is_authenticated:
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('dashboard')) # Si ya está logueado, ir al dashboard
 
-    form = LoginForm() # Crear instancia del formulario
-
-    # Procesar si el formulario se envió (POST) y es válido
+    form = LoginForm()
     if form.validate_on_submit():
-        # --- CORRECCIÓN: Buscar al usuario ANTES de usar la variable 'user' ---
         user = User.query.filter_by(username=form.username.data).first()
-
-        # --- CORRECCIÓN: Usar if/else multi-línea ---
-        # Verificar si se encontró el usuario Y si la contraseña es correcta
         if user and user.check_password(form.password.data):
-            # --- Código si el login es exitoso (indentado) ---
             login_user(user, remember=form.remember_me.data)
-            flash(f'Inicio de sesión exitoso para {user.username}!', 'success')
+            # Actualizar last_login
+            user.last_login = datetime.datetime.utcnow()
+            try:
+                db.session.commit()
+            except Exception as e_commit:
+                db.session.rollback()
+                print(f"Error al actualizar last_login para {user.username}: {e_commit}")
+                # No es crítico, continuar con el login
 
-            # Redirigir a la página 'next' si existe, o al dashboard
+            flash(f'Inicio de sesión exitoso. ¡Bienvenido, {user.username}!', 'success')
+            # Redirección segura
             next_page = request.args.get('next')
-            # Comprobación de seguridad para evitar redirecciones abiertas
-            if next_page and url_parse(next_page).netloc == '':
-                 return redirect(next_page)
-            else:
-                 return redirect(url_for('dashboard'))
+            # CORREGIDO: Usar url_parse importado
+            if not next_page or url_parse(next_page).netloc != '':
+                next_page = url_for('dashboard') # Redirigir al dashboard por defecto
+            return redirect(next_page)
         else:
-            # --- Código si el login falla (indentado) ---
-            # Si el usuario no existe o la contraseña es incorrecta
-            flash('Inicio de sesión fallido. Verifica usuario y contraseña.', 'error')
-        # --- Fin del if/else ---
-
-    # Mostrar la plantilla de login para solicitudes GET o si el form no es válido
+            flash('Credenciales inválidas. Por favor, verifica tu usuario y contraseña.', 'danger')
     return render_template('login.html', title='Iniciar Sesión', form=form)
+
 @app.route('/logout')
-@login_required
-def logout(): logout_user(); flash('Sesión cerrada.', 'info'); return redirect(url_for('login'))
+@login_required # Solo usuarios logueados pueden desloguearse
+def logout():
+    """Cierra la sesión del usuario."""
+    logout_user()
+    flash('Has cerrado sesión exitosamente.', 'info')
+    session.clear() # Limpiar toda la sesión al cerrar sesión
+    return redirect(url_for('login'))
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    # Nivel 0 indentación (inicio de función)
+    """Maneja el registro de nuevos usuarios."""
     if current_user.is_authenticated:
-        return redirect(url_for('dashboard'))
+        return redirect(url_for('dashboard')) # No permitir registro si ya está logueado
+
     form = RegistrationForm()
     if form.validate_on_submit():
-        # Nivel 1 indentación (dentro del if validate)
         try:
-            # Nivel 2 indentación (dentro del try)
             new_user = User(username=form.username.data, email=form.email.data)
             new_user.set_password(form.password.data) # Hashear contraseña
 
-            # Comprobar si es el primer usuario DENTRO del try
-            # Nivel 2 indentación
+            # El primer usuario registrado será administrador
             if User.query.count() == 0:
-                # Nivel 3 indentación (dentro del if anidado)
                 new_user.is_admin = True
-                print(f"INFO: Primer usuario '{new_user.username}' reg. como admin.")
+                print(f"INFO: Registrando primer usuario '{new_user.username}' como administrador.")
 
-            # Añadir y guardar en BD DENTRO del try
-            # Nivel 2 indentación
             db.session.add(new_user)
             db.session.commit()
-            flash(f'Cuenta creada para {form.username.data}! Inicia sesión.', 'success')
-            print(f"INFO: Nuevo user: {form.username.data}")
-            return redirect(url_for('login'))
-        # Nivel 1 indentación (except al mismo nivel que try)
+            flash(f'¡Cuenta creada exitosamente para {new_user.username}! Ahora puedes iniciar sesión.', 'success')
+            # Loguear automáticamente al nuevo usuario (opcional)
+            # login_user(new_user)
+            # return redirect(url_for('dashboard'))
+            return redirect(url_for('login')) # Redirigir a login tras registro exitoso
         except Exception as e:
-            # Nivel 2 indentación (dentro del except)
             db.session.rollback() # Revertir cambios en caso de error
-            flash(f'Error creando cuenta: {e}', 'error')
-            print(f"ERROR registro: {e}\n{traceback.format_exc()}")
-    # Nivel 0 indentación (return para método GET o si el form no validó en POST)
-    return render_template('register.html', title='Registro', form=form)
+            print(f"Error durante el registro: {e}\n{traceback.format_exc()}")
+            flash('Ocurrió un error durante el registro. Por favor, inténtalo de nuevo.', 'danger')
+    return render_template('register.html', title='Registrarse', form=form)
 
-# --- RUTAS PRINCIPALES (Protegidas) ---
+# --- Rutas Principales de la Aplicación ---
 @app.route('/')
-@login_required
+@app.route('/dashboard')
+@login_required # Requiere que el usuario esté logueado
 def dashboard():
-    try: active_alerts = [a for a in alert_manager.alerts if not a.get('reviewed')]; last_detection_entry = detection_history[-1] if detection_history else None; model_status = "Real" if detector.model else "Simulado"; all_alerts_sorted = alert_manager.get_alerts(show_all=True); recent_alerts = all_alerts_sorted[:5]
-    except Exception as e: print(f"ERROR dashboard: {e}\n{traceback.format_exc()}"); flash("Error dashboard.", "error"); active_alerts, last_detection_entry, model_status, recent_alerts = [], None, "Error", []
-    return render_template('dashboard.html', active_alerts_count=len(active_alerts), last_detection=last_detection_entry, model_status=model_status, recent_alerts=recent_alerts)
+    """Página principal (Dashboard) después de iniciar sesión."""
+    # Recuperar datos de la última sesión si existen
+    last_analysis = session.get('last_analysis', {})
+    data_info = last_analysis.get('data_info')
+    detection_results = last_analysis.get('detection_results')
+    simulation_results = last_analysis.get('simulation_results')
 
-@app.route('/data', methods=['GET', 'POST'])
+    # Obtener alertas recientes
+    recent_alerts = alert_manager.get_recent_alerts(limit=5) # Asume que AlertManager tiene este método
+
+    # Preparar datos para la plantilla
+    context = {
+        'title': 'Dashboard',
+        'data_info': data_info,
+        'detection_results': detection_results,
+        'simulation_results': simulation_results,
+        'recent_alerts': recent_alerts,
+        'model_loaded': detector.is_model_loaded() if hasattr(detector, 'is_model_loaded') else False, # Verificar método
+        'scaler_loaded': detector.is_scaler_loaded() if hasattr(detector, 'is_scaler_loaded') else False # Verificar método
+    }
+    return render_template('dashboard.html', **context)
+
+@app.route('/upload', methods=['GET', 'POST'])
 @login_required
-def manage_data():
+def upload_data():
+    """Maneja la carga de archivos CSV para análisis."""
     if request.method == 'POST':
-        action = request.form.get('action'); redirect_url = url_for('manage_data')
-        try:
-            if action == 'upload':
-                if 'file' not in request.files: flash('No se encontró archivo.', 'error'); return redirect(redirect_url)
-                file = request.files['file']; filename = file.filename
-                if filename == '': flash('No se seleccionó archivo.', 'warning'); return redirect(redirect_url)
-                if file and allowed_file(filename):
-                    filename = secure_filename(filename); filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename); file.save(filepath)
-                    success, message = data_manager.load_csv_data(filepath)
-                    # --- Bloque if/else corregido (multi-línea) ---
-                    if success:
-                        flash(message, 'success')
-                        session['loaded_filepath'] = filepath
-                        session.pop('processed_data_info', None)
-                    else:
-                        flash(message, 'error')
-                        session.pop('loaded_filepath', None)
-                elif file:
-                    flash(f"Tipo archivo no permitido.", 'error')
-            elif action == 'preprocess':
-                if data_manager.loaded_data is not None:
-                    success, message = data_manager.preprocess_data()
-                    if success:
-                        flash(message, 'success')
-                        session['processed_data_info'] = {'rows': len(data_manager.processed_data), 'cols': len(data_manager.processed_data.columns), 'timestamp': datetime.datetime.now().isoformat(timespec='seconds')}
-                    else:
-                        flash(message, 'error')
-                        session.pop('processed_data_info', None)
+        if 'file' not in request.files:
+            flash('No se seleccionó ningún archivo.', 'warning')
+            return redirect(request.url)
+        file = request.files['file']
+        if file.filename == '':
+            flash('No se seleccionó ningún archivo.', 'warning')
+            return redirect(request.url)
+
+        if file and allowed_file(file.filename):
+            # Usar secure_filename para evitar nombres de archivo maliciosos
+            filename = secure_filename(file.filename)
+            # Crear un nombre de archivo único para evitar sobreescrituras (opcional pero recomendado)
+            # unique_id = uuid.uuid4().hex
+            # unique_filename = f"{os.path.splitext(filename)[0]}_{unique_id}{os.path.splitext(filename)[1]}"
+            # filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename) # Versión simple
+
+            try:
+                file.save(filepath)
+                flash(f'Archivo "{filename}" cargado exitosamente.', 'success')
+
+                # Procesar el archivo usando DataManager
+                # CORREGIDO: Llamar a load_csv_data
+                # Asume que load_csv_data devuelve un resumen o None/Exception en error
+                print(f"DEBUG: Llamando a data_manager.load_csv_data con filepath: {filepath}")
+                data_summary = data_manager.load_csv_data(filepath)
+
+                if data_summary and isinstance(data_summary, dict):
+                     # Asegurarse de que el filepath se guarda en el resumen
+                     if 'filepath' not in data_summary:
+                         data_summary['filepath'] = filepath
+                     if 'filename' not in data_summary:
+                         data_summary['filename'] = filename
+
+                     # Guardar información del archivo cargado en la sesión
+                     # Limpiar resultados previos antes de guardar los nuevos
+                     session['last_analysis'] = {'data_info': data_summary}
+                     session.modified = True # Marcar sesión como modificada
+                     print(f"DEBUG: Data summary guardado en sesión: {data_summary}")
+                     flash('Archivo procesado. Información básica disponible.', 'info')
+                     # Redirigir al dashboard o a una página de visualización/detección
+                     return redirect(url_for('view_data'))
                 else:
-                    flash('Primero carga archivo CSV.', 'warning')
-            else:
-                flash('Acción desconocida.', 'warning')
-        except Exception as e:
-            flash(f"Error inesperado: {e}", "error")
-            print(f"ERROR manage_data POST: {e}\n{traceback.format_exc()}")
-        return redirect(redirect_url)
-    # GET Request
-    try: loaded_head_html = data_manager.get_loaded_data_head_html(); processed_head_html = data_manager.get_processed_data_head_html(); processed_info = session.get('processed_data_info'); loaded_filepath = session.get('loaded_filepath'); loaded_filename = os.path.basename(loaded_filepath) if loaded_filepath and os.path.exists(loaded_filepath) else None
-    except Exception as e: print(f"ERROR manage_data GET: {e}\n{traceback.format_exc()}"); flash("Error vistas previas.", "error"); loaded_head_html, processed_head_html, processed_info, loaded_filename = "<p>Err</p>", "<p>Err</p>", None, None
-    return render_template('data_management.html', loaded_head_html=loaded_head_html, processed_head_html=processed_head_html, loaded_filename=loaded_filename, processed_info=processed_info)
+                    # Si data_manager.load_csv_data devuelve None o False en error
+                    print(f"ERROR: data_manager.load_csv_data devolvió: {data_summary}")
+                    flash(f'Error al procesar el archivo "{filename}" con DataManager. Verifique el formato del CSV y los logs.', 'danger')
+                    # Opcional: eliminar archivo si falla el procesamiento inicial
+                    if os.path.exists(filepath):
+                       try:
+                           os.remove(filepath)
+                           print(f"DEBUG: Archivo {filepath} eliminado por fallo en procesamiento.")
+                       except OSError as e_rm:
+                           print(f"WARN: No se pudo eliminar {filepath} tras fallo: {e_rm}")
+                    # Limpiar info de sesión si falla
+                    session.pop('last_analysis', None)
+
+
+            except Exception as e:
+                flash(f'Error crítico al guardar o procesar el archivo: {e}', 'danger')
+                print(f"Error en upload_data: {e}\n{traceback.format_exc()}")
+                # Limpiar info de sesión si falla
+                session.pop('last_analysis', None)
+                # Redirigir de vuelta a upload en caso de error POST
+                return redirect(request.url) # Redirige a la misma página (upload)
+
+        else:
+            flash('Tipo de archivo no permitido. Solo se aceptan archivos .csv', 'warning')
+            return redirect(request.url)
+
+    # Método GET: Mostrar el formulario de carga
+    # Considerar si limpiar el análisis previo aquí es deseado
+    # session.pop('last_analysis', None) # Quitado para permitir ver resultados previos si se navega de vuelta
+    return render_template('upload.html', title='Cargar Datos')
+
+
+@app.route('/view_data')
+@login_required
+def view_data():
+    """Muestra información y visualizaciones básicas del último archivo cargado."""
+    last_analysis = session.get('last_analysis', {})
+    data_info = last_analysis.get('data_info')
+
+    if not data_info or 'dataframe_head' not in data_info: # Revisar la clave exacta que guarda DataManager
+        flash('No hay datos cargados o información de cabecera disponible para visualizar. Por favor, carga un archivo CSV primero.', 'warning')
+        return redirect(url_for('upload_data'))
+
+    # Convertir la representación de 'dataframe_head' (lista de dicts) de nuevo a DataFrame para plots
+    try:
+        # Asegurarse de que 'dataframe_head' existe y es una lista
+        df_head_list = data_info.get('dataframe_head', [])
+        if not isinstance(df_head_list, list):
+             raise ValueError("Formato de 'dataframe_head' no es una lista.")
+        if not df_head_list:
+             print("WARN: 'dataframe_head' está vacío en data_info.")
+             df_head = pd.DataFrame() # Crear DataFrame vacío
+        else:
+             df_head = pd.DataFrame(df_head_list)
+
+    except Exception as e:
+        flash(f"Error al reconstruir DataFrame para visualización: {e}", "danger")
+        print(f"Error reconstruyendo df_head: {e}")
+        df_head = pd.DataFrame() # Crear DataFrame vacío si falla
+
+    # Generar gráficos (ejemplo: distribución de una característica numérica y una categórica)
+    plots = {}
+    if not df_head.empty:
+        # Intentar encontrar una columna numérica y una categórica para ejemplo
+        numeric_cols = df_head.select_dtypes(include=np.number).columns
+        category_cols = df_head.select_dtypes(include='object').columns
+
+        if len(numeric_cols) > 0:
+            num_feature = numeric_cols[0] # Tomar la primera numérica
+            try:
+                plots['numeric_dist'] = generate_plot_base64(plot_feature_distribution_func, df=df_head, feature_name=num_feature)
+            except Exception as e_plot_num:
+                 print(f"Error generando plot numérico para {num_feature}: {e_plot_num}")
+        else:
+             print("WARN: No se encontraron columnas numéricas en df_head para graficar.")
+
+
+        if len(category_cols) > 0:
+            cat_feature = category_cols[0] # Tomar la primera categórica
+            try:
+                plots['category_dist'] = generate_plot_base64(plot_feature_distribution_func, df=df_head, feature_name=cat_feature)
+            except Exception as e_plot_cat:
+                 print(f"Error generando plot categórico para {cat_feature}: {e_plot_cat}")
+        else:
+            print("WARN: No se encontraron columnas categóricas en df_head para graficar.")
+
+
+    context = {
+        'title': 'Visualización de Datos Cargados',
+        'data_info': data_info,
+        'plots': plots
+    }
+    return render_template('view_data.html', **context)
+
+
+@app.route('/detect', methods=['GET', 'POST']) # Permitir POST si hay configuración futura
+@login_required
+def detect_threats_route():
+    """Ejecuta la detección de amenazas sobre los datos cargados."""
+    last_analysis = session.get('last_analysis', {})
+    data_info = last_analysis.get('data_info')
+
+    if not data_info or 'filepath' not in data_info:
+        flash('No hay datos cargados para analizar. Por favor, carga un archivo CSV primero.', 'warning')
+        print("DEBUG detect_threats_route: No data_info or filepath found in session.")
+        return redirect(url_for('upload_data'))
+
+    filepath = data_info['filepath']
+    filename = data_info.get('filename', os.path.basename(filepath)) # Obtener nombre original
+
+    # ANTES de verificar modelo/scaler, verificar si el archivo existe
+    if not os.path.exists(filepath):
+         flash(f'El archivo de datos "{filename}" no se encuentra en el servidor ({filepath}). Por favor, vuelve a cargarlo.', 'danger')
+         session.pop('last_analysis', None) # Limpiar info de sesión si el archivo no existe
+         print(f"DEBUG detect_threats_route: Filepath not found: {filepath}")
+         return redirect(url_for('upload_data'))
+
+    # Verificar si el modelo Y el scaler están cargados
+    model_is_loaded = detector.is_model_loaded() if hasattr(detector, 'is_model_loaded') else False
+    scaler_is_loaded = detector.is_scaler_loaded() if hasattr(detector, 'is_scaler_loaded') else False
+    print(f"DEBUG detect_threats_route: Check - Model Loaded: {model_is_loaded}, Scaler Loaded: {scaler_is_loaded}")
+
+    if not (model_is_loaded and scaler_is_loaded):
+         msg = 'El modelo de detección y/o el scaler no están cargados. No se pueden realizar predicciones.'
+         print(f"ERROR detect_threats_route: {msg}")
+         flash(msg, 'danger')
+         # Redirigir al admin_model_config para ver el estado o re-entrenar si es admin
+         if current_user.is_authenticated and current_user.is_admin:
+             return redirect(url_for('admin_model_config'))
+         else:
+             # Para usuarios no admin, redirigir al dashboard con el mensaje
+             return redirect(url_for('dashboard'))
+
+    # Si todo está listo, proceder con la detección
+    try:
+        print(f"DEBUG: Iniciando detección en archivo: {filepath}")
+        # Asume que detect_threats devuelve un diccionario con resultados
+        # Podría necesitar el DataFrame o la ruta al archivo
+        detection_results = detector.detect_threats(filepath_or_df=filepath)
+
+        if detection_results and isinstance(detection_results, dict):
+            flash('Detección de amenazas completada.', 'success')
+
+            # --- Generar Gráfico de Matriz de Confusión si está disponible ---
+            metrics = detection_results.get('metrics', {})
+            cm = metrics.get('confusion_matrix')
+            labels = metrics.get('labels', ['BENIGN', 'ATTACK']) # Obtener etiquetas si están en las métricas
+
+            if cm is not None:
+                 try:
+                     # Asegurarse que cm es una lista de listas o numpy array 2x2
+                     if isinstance(cm, np.ndarray) and cm.shape == (2, 2):
+                         cm_list = cm.tolist() # Convertir a lista para JSON
+                     elif isinstance(cm, list) and len(cm) == 2 and all(isinstance(row, list) and len(row) == 2 for row in cm):
+                         cm_list = cm
+                     else:
+                         print(f"WARN: Formato de matriz de confusión no esperado: {type(cm)}. No se generará gráfico.")
+                         cm_list = None
+
+                     if cm_list:
+                         plot_base64 = generate_plot_base64(
+                             plot_confusion_matrix_func,
+                             cm=cm_list,
+                             classes=labels,
+                             figsize=(5,4) # Tamaño más pequeño para el dashboard
+                         )
+                         if plot_base64:
+                              metrics['confusion_matrix_plot'] = plot_base64
+                              # Guardar la matriz como lista en los resultados también (si no estaba ya)
+                              metrics['confusion_matrix_data'] = cm_list
+                              print("DEBUG: Gráfico de matriz de confusión generado.")
+                         else:
+                              print("ERROR: Falló la generación del gráfico de matriz de confusión (generate_plot_base64 devolvió None).")
+
+                 except Exception as e_cm_plot:
+                     print(f"Error generando gráfico de matriz de confusión: {e_cm_plot}\n{traceback.format_exc()}")
+
+
+            # Actualizar la sesión con los resultados de detección
+            # Mantener data_info, añadir/actualizar detection_results
+            last_analysis['detection_results'] = detection_results
+            session['last_analysis'] = last_analysis
+            session.modified = True
+            print("DEBUG: Resultados de detección guardados en sesión.")
+
+            # Opcional: Añadir al historial (considerar persistencia en BD)
+            # detection_history.append(detection_results)
+
+            # Opcional: Generar alertas basadas en resultados
+            alerts = alert_manager.generate_alerts(detection_results) # Asume que AlertManager tiene este método
+            if alerts:
+                flash(f"Se generaron {len(alerts)} alertas nuevas.", "warning")
+                # Podrías guardar las alertas en BD o mostrarlas
+
+            return redirect(url_for('view_detection_results')) # Redirigir a la vista de resultados
+        else:
+            flash('La detección de amenazas no produjo resultados válidos o falló.', 'warning')
+            print(f"WARN detect_threats_route: detector.detect_threats devolvió: {detection_results}")
+            # Limpiar resultados de detección si falló
+            if 'detection_results' in last_analysis: del last_analysis['detection_results']
+            session['last_analysis'] = last_analysis
+            session.modified = True
+            return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        flash(f'Error durante la detección de amenazas: {e}', 'danger')
+        print(f"Error en detect_threats_route: {e}\n{traceback.format_exc()}")
+        # Limpiar resultados de detección si falló
+        if 'detection_results' in last_analysis: del last_analysis['detection_results']
+        session['last_analysis'] = last_analysis
+        session.modified = True
+        return redirect(url_for('dashboard'))
+
+
+@app.route('/view_detection_results')
+@login_required
+def view_detection_results():
+    """Muestra los resultados detallados de la última detección."""
+    last_analysis = session.get('last_analysis', {})
+    detection_results = last_analysis.get('detection_results')
+
+    if not detection_results:
+        flash('No hay resultados de detección disponibles. Por favor, ejecuta la detección primero.', 'warning')
+        # Decidir si redirigir a upload o detect
+        if 'data_info' in last_analysis:
+            return redirect(url_for('detect_threats_route')) # Si hay datos, intentar detectar
+        else:
+            return redirect(url_for('upload_data')) # Si no hay datos, ir a cargar
+
+    context = {
+        'title': 'Resultados de Detección',
+        'results': detection_results
+    }
+    return render_template('results.html', **context)
+
 
 @app.route('/simulate', methods=['GET', 'POST'])
 @login_required
-def simulate():
-    if request.method == 'POST':
+def simulate_threats_route():
+    """Configura e inicia la simulación de amenazas."""
+    form = SimulationForm()
+
+    if form.validate_on_submit():
         try:
-            duration = int(request.form.get('duration', '60')); intensity = int(request.form.get('intensity', '5'))
-            attacks_list = request.form.getlist('attacks'); attacks = [a.strip() for a in attacks_list if a.strip()] or ['Attack']
-            if duration <= 0: raise ValueError("Duración > 0");
-            if not (1 <= intensity <= 10): raise ValueError("Intensidad 1-10")
-            config = {"duration": duration, "intensity": intensity, "attacks": attacks}
-            print(f"INFO: Solicitud simulación: {config}"); sim_result_df = simulator.run_simulation(config)
-            if sim_result_df is not None and not sim_result_df.empty:
-                sim_id = str(uuid.uuid4()); temp_filename = f"sim_data_{sim_id}.pkl"; temp_filepath = os.path.join(app.config['TEMP_SIM_FOLDER'], temp_filename)
-                try: sim_result_df.to_pickle(temp_filepath); print(f"INFO: Simulación guardada: {temp_filepath}"); session.pop('last_simulation_data', None); session['simulation_ran'] = True; session['last_simulation_filepath'] = temp_filepath; session['simulation_info'] = {'rows_generated': len(sim_result_df), 'config': config, 'timestamp': datetime.datetime.now().isoformat(timespec='seconds'), 'filepath': temp_filepath}; flash(f'Simulación completada ({len(sim_result_df)} registros).', 'success')
-                except Exception as e_save: flash(f"Error guardando simulación: {e_save}", "error"); print(f"ERROR guardando pickle: {e_save}\n{traceback.format_exc()}"); session.clear()
-            else: flash('Simulación no generó datos.', 'warning'); session.pop('simulation_ran', None); session.pop('last_simulation_filepath', None); session.pop('simulation_info', None)
-        except ValueError as ve: flash(f'Entrada inválida: {ve}', 'error')
-        except Exception as e: flash(f'Error inesperado simulación: {e}', 'error'); print(f"ERROR simulate POST: {e}\n{traceback.format_exc()}"); session.pop('simulation_ran', None); session.pop('last_simulation_filepath', None); session.pop('simulation_info', None)
-        return redirect(url_for('simulate'))
-    # GET Request
-    try: last_sim_info = session.get('simulation_info'); last_sim_preview_df = None; sim_history = simulator.get_history()
-    except Exception as e: print(f"ERROR simulate GET: {e}\n{traceback.format_exc()}"); flash("Error cargando datos simulación.", "error"); last_sim_info, last_sim_preview_df, sim_history = None, None, []
-    return render_template('simulator.html', simulation_history=sim_history, last_simulation_info=last_sim_info, last_simulation_preview_df=last_sim_preview_df)
+            attack_type = form.attack_type.data
+            target_ip = form.target_ip.data
+            duration = form.duration.data
+            intensity = form.intensity.data
+            print(f"DEBUG: Iniciando simulación: Tipo={attack_type}, Target={target_ip}, Dur={duration}, Int={intensity}")
 
-@app.route('/report/last_detection_csv')
-@login_required # Protege esta ruta
-# @admin_required # Opcional: si solo los admins pueden descargar reportes
-def download_last_detection_csv():
-    """Ruta para descargar el reporte CSV de la última detección."""
-    # Obtener los últimos resultados de detección de la sesión
-    last_results = session.get('last_detection_results')
+            # Asume que run_simulation devuelve un dict con resultados o None/Exception
+            simulation_results = simulator.run_simulation(
+                attack_type=attack_type,
+                target=target_ip,
+                duration=duration,
+                intensity=intensity
+            )
 
-    if not last_results:
-        flash("No hay resultados de detección recientes para generar reporte.", "warning")
-        return redirect(url_for('detect')) # Redirige de vuelta a la página de detección
+            if simulation_results and isinstance(simulation_results, dict):
+                flash(f'Simulación de ataque "{attack_type}" completada.', 'success')
+                # Guardar resultados en sesión
+                last_analysis = session.get('last_analysis', {})
+                last_analysis['simulation_results'] = simulation_results
+                session['last_analysis'] = last_analysis
+                session.modified = True
+                print("DEBUG: Resultados de simulación guardados en sesión.")
 
-    try:
-        # Generar el contenido CSV
-        csv_content = generate_last_detection_csv(last_results)
-
-        if csv_content is None:
-             flash("Error al generar el contenido del reporte CSV.", "error")
-             return redirect(url_for('detect'))
-
-        # Crear una respuesta Flask para servir el archivo
-        response = make_response(csv_content)
-
-        # Establecer las cabeceras para forzar la descarga y nombrar el archivo
-        timestamp_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"reporte_deteccion_{timestamp_str}.csv"
-        response.headers["Content-Disposition"] = f"attachment; filename={filename}"
-        response.headers["Content-type"] = "text/csv" # Tipo MIME para CSV
-
-        print(f"INFO: Reporte CSV generado y enviado: {filename}")
-        return response # Retorna la respuesta con el archivo
-
-    except Exception as e:
-        print(f"ERROR generando reporte CSV: {e}\n{traceback.format_exc()}")
-        flash("Error interno al generar el reporte CSV.", "error")
-        return redirect(url_for('detect')) # Redirige en caso de error interno
-
-@app.route('/detect', methods=['GET', 'POST'])
-@login_required # Asegúrate de que este decorador esté presente y alineado a la izquierda
-def detect(): # La definición de la función también debe estar alineada a la izquierda
-    print(f"DEBUG: Accediendo a ruta /detect con método {request.method}")
-    # Obtener historial al inicio para que esté disponible tanto en POST como en GET
-    detection_history = alert_manager.get_detection_history()
-
-    if request.method == 'POST': # La sentencia if para el método POST
-        print("DEBUG: Procesando solicitud POST para /detect")
-        try: # <-- Primer try block (para manejar errores generales del POST)
-            # --- Procesar Selección de Fuente de Datos ---
-            datasource = request.form.get('datasource')
-            print(f"DEBUG: Fuente de datos seleccionada: {datasource}")
-            df_to_detect = None
-            source_info = "Fuente Desconocida" # Inicializar source_info
-
-            if datasource == 'processed': # Indentado dentro del try de POST
-                processed_data_obj = data_manager.get_processed_data() # Indentado dentro del if
-                if processed_data_obj is not None and not processed_data_obj.empty: # Indentado dentro del if
-                    df_to_detect = processed_data_obj # Indentado dentro del if
-                    source_info = "Datos Cargados y Preprocesados" # Indentado dentro del if
-                else: # Indentado al mismo nivel que el if processed_data_obj
-                    flash("No hay datos cargados y preprocesados disponibles.", "warning") # Indentado dentro del else
-                    print("WARN: Intento de detección con datos preprocesados pero no disponibles.") # Indentado dentro del else
-
-            elif datasource == 'simulation': # Indentado al mismo nivel que el if datasource == 'processed'
-                sim_info = session.get('simulation_info') # Indentado dentro del elif
-                if sim_info and sim_info.get('filepath') and os.path.exists(sim_info['filepath']): # Indentado dentro del elif
-                    try: # <-- try block para cargar datos de simulación
-                        print(f"INFO: Cargando datos de simulación desde {sim_info['filepath']}") # Indentado dentro del try
-                        df_to_detect = pd.read_pickle(sim_info['filepath']) # Indentado dentro del try
-                        source_info = f"Datos de Simulación ({os.path.basename(sim_info['filepath'])})" # Indentado dentro del try
-                    except Exception as e: # <-- except block para cargar datos de simulación (alineado con su try)
-                        print(f"ERROR cargando datos de simulación para detección: {e}\n{traceback.format_exc()}") # Indentado dentro del except
-                        flash(f"Error al cargar datos de simulación para detección: {e}", "danger") # Indentado dentro del except
-                        df_to_detect = None # Indentado dentro del except
-                else: # Indentado al mismo nivel que el if sim_info
-                    flash("No hay datos de simulación disponibles.", "warning") # Indentado dentro del else
-                    print("WARN: Intento de detección con datos de simulación pero no disponibles.") # Indentado dentro del else
-
-            else: # Indentado al mismo nivel que if/elif datasource
-                flash("Fuente de datos no válida seleccionada.", "danger") # Indentado dentro del else
-                print(f"WARN: Fuente de datos no válida seleccionada: {datasource}") # Indentado dentro del else
-
-            # --- Ejecutar Detección ---
-            detection_output = None
-            if df_to_detect is not None and not df_to_detect.empty: # Indentado dentro del try de POST
-                print(f"INFO: Iniciando detección: {source_info} ({len(df_to_detect)} filas)...") # Indentado dentro del if
-                try: # <-- try block para la ejecución del detector
-                    # Esta es la llamada principal al detector
-                    detection_output = detector.run_detection(df_to_detect) # Indentado dentro del try
-                    print("INFO: Ejecución de detección completada.") # Indentado dentro del try
-
-                except Exception as e: # <-- except block para la ejecución del detector (alineado con su try)
-                    print(f"ERROR durante la ejecución del detector: {e}\n{traceback.format_exc()}") # Indentado dentro del except
-                    flash(f"Error durante la detección: {e}", "danger") # Indentado dentro del except
-                    detection_output = None # Asegurar que detection_output sea None si hay error
-
-            # --- Guardar Resultados en Sesión e Historial y Generar Alertas ---
-            if detection_output is not None: # Indentado dentro del try de POST
-                print("DEBUG: Procesando resultados de detección...") # Indentado dentro del if
-                try: 
-                    if request.method == 'POST':
-                        if detection_output is not None:
-                            print("DEBUG: Procesando resultados de detección...")
-                            try:
-                                results_for_session_and_history = {
-                                    'timestamp': datetime.datetime.now().isoformat(),
-                                    'source_info': source_info,
-                                    'rows_analyzed': len(df_to_detect) if df_to_detect is not None else 0,
-                                    'model_threshold': getattr(detector, 'prediction_threshold', None), # Re-verifica esta línea
-                                    'metrics': detection_output.get('metrics', {}), # Re-verifica esta línea
-                                    'detection_summary': detection_output.get('detection_summary', {}),
-                                    }
-                                print("\n--- DEBUG: Contenido de detection_output retornado por detector.run_detection ---")
-                                print(f"DEBUG: detection_output: {detection_output}") # Imprime el diccionario completo retornado
-                                print("\n--- DEBUG: Contenido de results_for_session_and_history antes de guardar ---")
-                                print(f"DEBUG: results_for_session_and_history: {results_for_session_and_history}")
-                                print("--- FIN DEBUG ---\n")
-                                history_summary = results_for_session_and_history.copy()
-                                history_summary.pop('data_head', None)
-                                print("\n--- DEBUG: history_summary final antes de añadir a alert_manager ---")
-                                print(f"DEBUG: history_summary: {history_summary}")
-                                print("--- FIN DEBUG ---\n")
-                                alert_manager.add_detection_to_history(history_summary)
-                                print("INFO: Resumen de detección añadido al historial.")
-                            except Exception as e:
-                                results_for_session_and_history = { # Indentado dentro del try
-                        'timestamp': datetime.datetime.now().isoformat(), # Guardar como ISO string para compatibilidad de sesión
-                        'source_info': source_info, # Info sobre la fuente de datos
-                        'rows_analyzed': len(df_to_detect) if df_to_detect is not None else 0,
-'model_threshold': getattr(detector, 'prediction_threshold', None),
-'metrics': detection_output.get('metrics', {}),
-                        'detection_summary': detection_output.get('detection_summary', {}), # Guardar resumen (dict)
-                        
-            
-                    }
-                    
-                                        
-
-                    # Limitar las filas para la vista previa en sesión para evitar Cookie too large
-                    max_rows_head = 5 # <-- LIMITAR FILAS AQUÍ PARA LA SESION
-                    detection_data_df = detection_output.get('data') # Obtener el DF con las columnas originales + predicciones
-                    if detection_data_df is not None and not detection_data_df.empty:
-                        # Convertir las primeras N filas a lista de diccionarios para guardar en sesión
-                        # Seleccionar solo las columnas que queremos mostrar en la vista previa
-                        preview_cols = ['timestamp', 'src_ip', 'dst_ip', 'protocol', 'label', 'prediction_label']
-                        # Asegurarnos de que las columnas existen antes de seleccionarlas
-                        available_preview_cols = [col for col in preview_cols if col in detection_data_df.columns]
-
-                        if available_preview_cols:
-                            results_for_session_and_history['data_head'] = detection_data_df[available_preview_cols].head(max_rows_head).to_dict('records')
-                        else:
-                            # Si no hay columnas de vista previa disponibles, guardar todas las columnas (limitado por max_rows_head)
-                            print("WARN: Columnas requeridas para vista previa no encontradas. Guardando todas las columnas del head.")
-                            results_for_session_and_history['data_head'] = detection_data_df.head(max_rows_head).to_dict('records')
-
-                    else:
-                        print("WARN: No hay DataFrame de detección disponible para data_head.")
-                        results_for_session_and_history['data_head'] = [] # Asegurar que siempre sea una lista
-
-                    # Store results in session
-                    session['last_detection_results'] = results_for_session_and_history
-                    print("DEBUG: Resultados de detección guardados en sesión.")
-
-                    # Add summary to history managed by AlertManager
-                    # Asegurar que solo guardamos un resumen en el historial (sin el data_head completo)
-                    history_summary = results_for_session_and_history.copy()
-                    history_summary.pop('data_head', None) # Eliminar data_head del historial para mantenerlo ligero
-                    alert_manager.add_detection_to_history(history_summary)
-                    print("INFO: Resumen de detección añadido al historial.")
-
-                    # Generar alertas basadas en los resultados (usando el DataFrame completo, no solo el head)
-                    # Asume que generate_alerts espera el DataFrame o una lista de resultados específicos
-                    alert_manager.generate_alerts(detection_output.get('data')) # Pasa el DataFrame completo si generate_alerts lo espera así
-                    print(f"INFO: Nuevas alertas generadas (cumpliendo umbral '{alert_manager.config.get('severity_threshold', 'Media')}').")
-
-                    flash("Detección completada exitosamente.", "success")
-                    print("SUCCESS: Detección completada.")
-
-                except Exception as e: # <-- except block para procesar resultados post-detección (alineado con su try)
-                    print(f"ERROR procesando resultados post-detección: {e}\n{traceback.format_exc()}")
-                    flash(f"Error al procesar resultados de detección: {e}", "danger")
-
-            else: # Indentado al mismo nivel que el 'if detection_output is not None:'
-                # Esto ocurre si df_to_detect estaba vacío o si run_detection retornó None
-                if df_to_detect is not None and not df_to_detect.empty: # Comprobar si había datos para detectar
-                    flash("La detección no produjo resultados válidos.", "warning")
-                    print("WARN: Detección no produjo resultados válidos.")
-                # Si no había datos para detectar, el mensaje ya se flasheó antes.
-                print("DEBUG: detection_output estaba None o df_to_detect estaba vacío/None.")
-
-
-        except Exception as e: # <-- except block para el try principal de POST (alineado con el primer 'try:')
-            print(f"ERROR general en POST /detect: {e}\n{traceback.format_exc()}")
-            flash(f"Error interno al iniciar la detección: {e}", "danger")
-
-        # Después de procesar POST (éxito o error), redirigir a la misma ruta GET
-        # La ruta GET leerá los resultados (si se guardaron en la sesión) o mostrará el estado inicial
-        print("DEBUG: Redirigiendo a /detect GET después de POST.")
-        return redirect(url_for('detect')) # <-- RETORNO después de POST (indentado al mismo nivel que el if request.method)
-
-
-    # GET Request (Este bloque maneja la solicitud GET inicial o la redirección después de POST)
-    # Bloque try principal para todo el procesamiento de la solicitud GET
-    try: # <-- Segundo try block (para manejar errores generales del GET)
-        
-        # Inicializar variables con valores por defecto seguros
-        last_results = session.get('last_detection_results')
-        cm_plot_url = None
-        report_df = None
-        metrics = None # Define metrics initially as None
-        data_head_html = None # Variable para almacenar la cadena HTML de la vista previa de datos
-
-        # --- Procesar Métricas si están Disponibles ---
-        # Comprobar si hay resultados en la sesión y si el diccionario de métricas existe y es un diccionario
-        if last_results and isinstance(last_results.get('metrics'), dict): # Indentado dentro del try de GET
-            metrics = last_results['metrics'] # Asignar metrics si es válido (indentado dentro del if)
-            print("DEBUG: Métricas encontradas en la sesión.")
-
-        # Si las métricas están disponibles, procesar el plot y el reporte
-        if metrics: # Indentado dentro del try de GET
-            print("DEBUG: Procesando métricas para vista GET.")
-            # --- Procesar Plot de Matriz de Confusión ---
-            # Comprobar si los datos de la matriz de confusión existen
-            if metrics.get('confusion_matrix') is not None: # Indentado dentro del if metrics
-                try: # <-- try block específicamente para la generación del plot CM
-                    # generate_plot_base64 requiere la función de ploteo y los datos
-                    # Asegúrate de que plot_confusion_matrix_func está definida antes de esta ruta
-                    cm_plot_url = generate_plot_base64(plot_confusion_matrix_func, metrics['confusion_matrix']) # Indentado dentro del try
-                    print("DEBUG: Plot CM generado.")
-                except Exception as e: # <-- except block para la generación del plot CM (alineado con su try)
-                    print(f"ERROR generando plot CM: {e}\n{traceback.format_exc()}") # Indentado dentro del except
-                    cm_plot_url = None # Establecer a None si falla la generación del plot (indentado dentro del except)
-
-            # --- Procesar Reporte de Clasificación ---
-            # Comprobar si los datos del reporte existen
-            if metrics.get('report') is not None: # Indentado dentro del if metrics
-                try: # <-- Try block para convertir el diccionario del reporte a DataFrame
-                    report_df = pd.DataFrame(metrics['report']).transpose() # Indentado dentro del try
-                    print("DEBUG: Reporte convertido a DataFrame.")
-                except Exception as e: # <-- except block para convertir reporte a DF (alineado con su try)
-                    print(f"WARN: Falló la conversión del reporte a DF: {e}") # Indentado dentro del except
-                    report_df = None # Asignar None si falla la conversión (indentado dentro del except)
-            # --- Fin Procesar Reporte de Clasificación ---
-        # --- Fin Procesar Métricas si están Disponibles ---
-
-
-        # --- Manejar Vista Previa de Datos en App.py (para mostrar en el template GET) ---
-        # Esta lógica genera el HTML para mostrar las primeras filas guardadas en sesión
-        if last_results and last_results.get('data_head'): # Indentado dentro del try de GET
-            data_head_records = last_results['data_head'] # Obtener la lista de dicts (limitada a 5 en POST) (indentado dentro del if)
-            if data_head_records: # Comprobar si la lista de registros no está vacía (indentado dentro del if)
-                print("DEBUG: Generando vista previa de datos HTML.")
-                try: # <-- try block para generar HTML de vista previa
-                    # Convertir la lista de dicts a DataFrame de pandas
-                    preview_df = pd.DataFrame(data_head_records) # Indentado dentro del try
-                    # Seleccionar columnas específicas para la tabla de vista previa
-                    # Asegúrate de que los nombres de columna coinciden exactamente con tu DataFrame
-                    required_cols = ['timestamp', 'src_ip', 'dst_ip', 'protocol', 'label', 'prediction_label']
-                    # Comprobar si todas las columnas requeridas existen antes de seleccionar
-                    available_cols = [col for col in required_cols if col in preview_df.columns] # Indentado dentro del try
-
-                    if available_cols: # <--- INICIO IF correctamente indentado (dentro del try)
-                        # Generar HTML tabla para las columnas seleccionadas
-                        data_head_html = preview_df[available_cols].to_html(classes=['data-table', 'table-sm'], border=0, index=False) # max_rows handled by head(5) in POST (indentado dentro del if)
-                        print("DEBUG: HTML de vista previa generado con columnas requeridas.")
-                    else: # <--- ELSE correctamente indentado (alineado con el 'if available_cols:')
-                        print("WARN: Ninguna de las columnas requeridas para vista previa de datos encontrada en data_head. Generando con columnas disponibles.") # Indentado dentro del else
-                        # Fallback: generar HTML para todas las columnas disponibles si ninguna de las requeridas existe
-                        data_head_html = preview_df.to_html(classes=['data-table', 'table-sm'], border=0, index=False) # Indentado dentro del else
-                        print("DEBUG: HTML de vista previa generado con todas las columnas disponibles.")
-
-
-                except Exception as e: # <--- EXCEPT para el 'try' que intenta generar el HTML (alineado con su try)
-                    print(f"ERROR generando HTML para vista previa de datos: {e}\n{traceback.format_exc()}") # Indentado dentro del except
-                    data_head_html = "<p>Error al cargar vista previa de datos.</p>" # Mensaje de error si falla la generación HTML (indentado dentro del except)
-            else: # <--- ELSE para el 'if data_head_records:' (alineado con el if)
-                # Mensaje si data_head existe en la sesión pero es una lista vacía
-                data_head_html = "<p>No hay datos disponibles para la vista previa.</p>" # Indentado dentro del else
-                print("DEBUG: data_head estaba vacío o None, no se generó HTML de vista previa.")
-        else: # <--- ELSE para el 'if last_results and last_results.get('data_head'):' (alineado con el if)
-             # Mensaje si no hay last_results o data_head en la sesión
-             data_head_html = "<p>No hay resultados de detección previos para mostrar la vista previa.</p>"
-             print("DEBUG: No hay last_detection_results o data_head en sesión.")
-        # --- Fin Manejar Vista Previa de Datos ---
-
-
-        # --- Verificar disponibilidad de datos para el formulario (para mostrar en el template GET) ---
-        print("DEBUG: Verificando disponibilidad de datos para el formulario GET.")
-        # Check if simulation data file exists based on session info
-        sim_info = session.get('simulation_info', {}) # Usar .get con {} para evitar error si 'simulation_info' no existe
-        sim_filepath = sim_info.get('filepath')
-        has_simulation_file = sim_filepath and os.path.exists(sim_filepath)
-        print(f"DEBUG: Archivo simulación disponible: {has_simulation_file}")
-
-        # Check if processed data exists in the DataManager instance
-        processed_data_obj = data_manager.get_processed_data()
-        has_processed = processed_data_obj is not None and not processed_data_obj.empty
-        print(f"DEBUG: Datos preprocesados disponibles: {has_processed}")
-        # --- Fin Verificar disponibilidad de datos ---
-
-
-    except Exception as e: # <-- except block principal para el TRY de la solicitud GET (alineado con el 'try:' al inicio del bloque GET)
-        print(f"ERROR general en GET /detect: {e}\n{traceback.format_exc()}")
-        flash("Error preparando página de detección.", "error")
-        # Asegurar que todas las variables pasadas a la plantilla tengan valores por defecto seguros en caso de CUALQUIER error en el try
-        last_results = None
-        cm_plot_url = None
-        report_df = None
-        data_head_html = "<p>Error al cargar la página de detección.</p>" # Mensaje de error genérico para la vista previa
-        has_processed = False
-        has_simulation_file = False
-        # detection_history y detector se asumen disponibles globalmente o manejados fuera de este error específico
-
-
-    # --- RETURN FINAL ---
-    # Esta sentencia return está FUERA del bloque try/except principal de GET
-    # Asegura que la función siempre devuelve una respuesta, incluso si hay un error en el try de GET
-    print("DEBUG: Renderizando template detection.html...")
-    return render_template('detection.html', # <-- LA SENTENCIA RETURN FINAL, DEBE ESTAR ALINEADA CON LA SENTENCIA 'try:' y 'except:' principal del bloque GET
-        has_processed_data=has_processed,
-        has_simulation_data=has_simulation_file,
-        last_results=last_results, # Todavía pasamos last_results por si el template lo usa en otras partes
-        report_df=report_df,
-        cm_plot_url=cm_plot_url,
-        data_head_html=data_head_html, # Pasamos la cadena HTML generada para la vista previa de datos
-        detection_history=detection_history, # Se asume globalmente accesible o manejado (se obtiene al inicio de la función)
-        detector=detector # Se asume globalmente accesible
-    )
-# En app.py
-
-# ... (importaciones y otras rutas) ...
-
-@app.route('/alerts', methods=['GET', 'POST'])
-@login_required
-def alerts():
-    # Determinar la URL de redirección al principio es útil
-    redirect_url = url_for('alerts', show_all=request.args.get('show_all', 'false'))
-
-    if request.method == 'POST':
-        action = request.form.get('action') # Obtener la acción del formulario
-
-        try:
-            # === MANEJAR LA NUEVA ACCIÓN 'delete_all' ===
-            if action == 'delete_all':
-                print("INFO: Solicitud para borrar todas las alertas recibida.")
-                # Suponiendo que tu alert_manager tiene un método delete_all_alerts()
-                # Este método debería devolver (True/False, mensaje)
-                success, message = alert_manager.delete_all_alerts()
-                flash(message, 'success' if success else 'error')
-            # === FIN MANEJO 'delete_all' ===
-
-            # === LÓGICA EXISTENTE (Marcar como revisada) ===
-            # Si la acción no es 'delete_all', asumimos que es marcar una alerta.
-            # Verificamos si se envió 'alert_id'.
-            else:
-                alert_id_str = request.form.get('alert_id')
-                if alert_id_str:
-                    alert_id = int(alert_id_str) # Puede lanzar ValueError
-                    success_mark = alert_manager.mark_alert_reviewed(alert_id)
-                    flash(f"Alerta {alert_id} marcada como revisada.", 'success') if success_mark else flash(f"No se pudo marcar la alerta {alert_id}.", 'warning')
+                # Opcional: Analizar los datos simulados con el detector
+                sim_data_path = simulation_results.get('output_filepath')
+                if sim_data_path and os.path.exists(sim_data_path):
+                     flash('Analizando datos generados por la simulación...', 'info')
+                     # Actualizar data_info en sesión para que la detección use el archivo simulado
+                     # Crear un resumen básico del archivo simulado
+                     sim_data_info = {
+                         'filepath': sim_data_path,
+                         'filename': os.path.basename(sim_data_path),
+                         'source': 'Simulation',
+                         'rows': simulation_results.get('rows_generated', 'N/A'), # Asumiendo que el simulador lo devuelve
+                         # Podrías añadir más info si el simulador la provee
+                         # 'dataframe_head': [...] # Podrías leer las primeras líneas si es necesario
+                     }
+                     last_analysis['data_info'] = sim_data_info
+                     # Limpiar resultados de detección anteriores si los hubiera
+                     if 'detection_results' in last_analysis:
+                         del last_analysis['detection_results']
+                     session['last_analysis'] = last_analysis
+                     session.modified = True
+                     print(f"DEBUG: Data_info actualizado con datos de simulación: {sim_data_info}")
+                     return redirect(url_for('detect_threats_route')) # Ir a detectar sobre los datos simulados
                 else:
-                    # Si no es 'delete_all' y no hay 'alert_id', es una solicitud POST inesperada
-                    flash("Acción desconocida o ID de alerta faltante.", 'warning')
-            # === FIN LÓGICA EXISTENTE ===
-
-        except ValueError:
-             # Este error solo ocurriría al intentar convertir alert_id_str a int
-            flash("ID de alerta inválido.", 'error')
+                     print("WARN: Simulación completada pero no se encontró archivo de salida o no se reportó.")
+                     return redirect(url_for('dashboard')) # Volver al dashboard si no hay datos para analizar
+            else:
+                flash('La simulación no produjo resultados válidos o falló.', 'warning')
+                print(f"WARN simulate_threats_route: simulator.run_simulation devolvió: {simulation_results}")
+                return redirect(request.url) # Recargar página de simulación
         except Exception as e:
-            flash(f"Error procesando la solicitud: {e}", "error")
-            print(f"ERROR alerts POST: {e}\n{traceback.format_exc()}")
+            flash(f'Error durante la simulación: {e}', 'danger')
+            print(f"Error en simulate_threats_route: {e}\n{traceback.format_exc()}")
+            return redirect(request.url) # Recargar página de simulación
 
-        # Redirigir siempre después de procesar el POST para evitar reenvíos
-        return redirect(redirect_url)
+    # Método GET: Mostrar formulario de simulación
+    # CORREGIDO: Pasar simulation_results=None para evitar UndefinedError en plantilla
+    last_analysis = session.get('last_analysis', {})
+    current_simulation_results = last_analysis.get('simulation_results') # Mostrar resultados si existen en sesión
+    # Limpiar resultados de simulación previos si se recarga el form? Depende del flujo deseado.
+    # if 'simulation_results' in last_analysis: del last_analysis['simulation_results']
+    # session['last_analysis'] = last_analysis
+    # session.modified = True
 
-    # --- Solicitud GET (sin cambios) ---
-    try:
-        show_all = request.args.get('show_all', 'false').lower() == 'true'
-        current_alerts = alert_manager.get_alerts(show_all) # Obtener alertas (activas o todas)
-    except Exception as e:
-        print(f"ERROR alerts GET: {e}\n{traceback.format_exc()}")
-        flash("Error al obtener las alertas.", "error")
-        current_alerts, show_all = [], False # Valores seguros en caso de error
+    return render_template('simulate.html',
+                           title='Simular Amenazas',
+                           form=form,
+                           simulation_results=current_simulation_results) # Pasar None o resultados existentes
 
-    return render_template('alerts.html', alerts=current_alerts, show_all=show_all)
 
+@app.route('/alerts')
+@login_required
+def view_alerts():
+    """Muestra el historial de alertas."""
+    # Asume que AlertManager tiene un método para obtener todas las alertas (o paginadas)
+    all_alerts = alert_manager.get_all_alerts()
+    context = {
+        'title': 'Historial de Alertas',
+        'alerts': all_alerts
+    }
+    return render_template('alerts.html', **context)
+
+# --- Rutas de Administración ---
 @app.route('/admin')
 @login_required
-def admin_landing():
-    if not current_user.is_admin: flash("No tienes permisos.", "error"); return redirect(url_for('dashboard'))
-    try: system_config = admin_manager.get_config(); alert_config = alert_manager.config; system_logs = admin_manager.get_system_logs()
-    except Exception as e: print(f"ERROR admin GET: {e}\n{traceback.format_exc()}"); flash("Error cargar datos admin.", "error"); system_config, alert_config, system_logs = {}, {}, "Err logs."
-    alert_severity_levels = ['Baja', 'Media', 'Alta', 'Crítica']
-    return render_template('admin.html', system_config=system_config, alert_config=alert_config, alert_severity_levels=alert_severity_levels, system_logs=system_logs)
+@admin_required
+def admin_dashboard():
+    """Redirige al panel principal de administración (ej. usuarios)."""
+    return redirect(url_for('admin_users'))
 
-@app.route('/settings', methods=['GET', 'POST'])
-@login_required
-# @admin_required  # Opcional: si solo los administradores pueden cambiar la configuración
-def settings():
-    print(f"DEBUG: Accediendo a ruta /settings con método {request.method}")
-
-    global system_config, detector, alert_manager
-
-    if request.method == 'POST':
-        print("DEBUG: Procesando solicitud POST para /settings")
-        try:
-            # --- Actualizar configuración del sistema y del detector ---
-            new_glm_threshold_str = request.form.get('glm_threshold')
-
-            if new_glm_threshold_str:
-                try:
-                    new_glm_threshold = float(new_glm_threshold_str)
-                    if 0.0 <= new_glm_threshold <= 1.0:
-                        system_config['glm_threshold'] = new_glm_threshold
-                        if 'detector' in globals() and detector is not None:
-                            detector.prediction_threshold = new_glm_threshold
-                            print(f"INFO: Umbral del detector actualizado a {new_glm_threshold}.")
-                        else:
-                            print("WARN: Instancia de detector no disponible para actualizar el umbral.")
-                        flash(f"Umbral del modelo actualizado a {new_glm_threshold:.2f}.", "success")
-                        print(f"INFO: Umbral del modelo actualizado a {new_glm_threshold}.")
-                    else:
-                        flash("Error: El umbral del modelo debe estar entre 0.0 y 1.0.", "warning")
-                        print(f"WARN: Intento de actualizar umbral con valor fuera de rango: {new_glm_threshold}")
-                except ValueError:
-                    flash("Error: El umbral del modelo debe ser un número válido.", "warning")
-                    print(f"WARN: Intento de actualizar umbral con valor no numérico: {new_glm_threshold_str}")
-
-            # --- Actualizar configuración de alertas ---
-            new_severity_threshold = request.form.get('severity_threshold')
-            new_notify_email = request.form.get('notify_email') == 'on'
-
-            if 'alert_manager' in globals() and alert_manager is not None:
-                alert_manager.update_config(severity_threshold=new_severity_threshold, notify_email=new_notify_email)
-                print("INFO: Configuración de alertas procesada.")
-            else:
-                print("WARN: Instancia de AlertManager no disponible para procesar configuración de alertas.")
-
-            return redirect(url_for('settings'))
-
-        except Exception as e:
-            print(f"ERROR procesando solicitud POST para /settings: {e}\n{traceback.format_exc()}")
-            flash("Error interno al guardar configuración.", "danger")
-            return redirect(url_for('settings'))
-
-    try:
-        print("DEBUG: Procesando solicitud GET para /settings")
-        current_glm_threshold = system_config.get('glm_threshold', 0.7)
-        print(f"DEBUG: Umbral actual para vista GET: {current_glm_threshold}")
-
-        current_severity_threshold = 'Media'
-        current_notify_email = False
-
-        if 'alert_manager' in globals() and alert_manager is not None:
-            current_severity_threshold = alert_manager.config.get('severity_threshold', 'Media')
-            current_notify_email = alert_manager.config.get('notify_email', False)
-            print(f"DEBUG: Config alertas para vista GET: Severidad={current_severity_threshold}, Email={current_notify_email}")
-        else:
-            print("WARN: Instancia de AlertManager no disponible para obtener config de alertas en GET.")
-
-        return render_template('settings.html',
-                               title='Configuración',
-                               glm_threshold=current_glm_threshold,
-                               severity_threshold=current_severity_threshold,
-                               notify_email=current_notify_email,
-                               alert_severity_levels=['Baja', 'Media', 'Alta', 'Crítica']
-                               )
-    except Exception as e:
-        print(f"ERROR preparando página de configuración GET: {e}\n{traceback.format_exc()}")
-        flash("Error al cargar la página de configuración.", "danger")
-        return render_template('settings.html',
-                               title='Configuración',
-                               glm_threshold=system_config.get('glm_threshold', 0.7),
-                               severity_threshold='Media',
-                               notify_email=False,
-                               alert_severity_levels=['Baja', 'Media', 'Alta', 'Crítica']
-                               )
-
-
-@app.route('/admin/action', methods=['POST'])
-@login_required
-def admin_actions():
-    if not current_user.is_admin: flash("Acción no autorizada.", "error"); return redirect(url_for('dashboard'))
-    action = request.form.get('action')
-    try:
-        if action == 'update_threshold': new_threshold = float(request.form.get('glm_threshold')); success, message = admin_manager.update_glm_threshold(new_threshold); flash(message, 'success' if success else 'error')
-        elif action == 'update_alert_config': severity = request.form.get('alert_severity_threshold'); notify = 'notify_email' in request.form; success = alert_manager.update_config(severity_threshold=severity, notify_email=notify); flash("Config. alertas actualizada.", "success") if success else flash("No se pudo actualizar.", "warning")
-        elif action == 'retrain': retrain_msg = admin_manager.trigger_retraining(); flash(retrain_msg, 'info')
-        elif action == 'go_to_user_list': return redirect(url_for('list_users')) # Asegúrate que este link exista en admin.html si lo necesitas
-        else: flash(f"Acción admin '{action}' desconocida.", 'warning')
-    except ValueError: flash("Valor numérico inválido.", 'error')
-    except Exception as e: flash(f"Error acción admin: {e}", "error"); print(f"ERROR admin POST: {e}\n{traceback.format_exc()}")
-    return redirect(url_for('admin_landing'))
 
 @app.route('/admin/users')
 @login_required
-@admin_required 
-def list_users():
-    if not current_user.is_admin: flash("No tienes permisos.", "error"); return redirect(url_for('dashboard'))
-    try: all_users = User.query.order_by(User.username).all()
-    except Exception as e: print(f"Error obteniendo usuarios: {e}\n{traceback.format_exc()}"); flash("Error al cargar usuarios.", "error"); all_users = []
-    return render_template('users_list.html', users=all_users)
-
-@app.route('/users/manage') # Ruta placeholder usuarios
-@login_required # Proteger también por si acaso
-def manage_users_placeholder():
-    # Quizás añadir chequeo de admin aquí también
-    # if not current_user.is_admin: return redirect(url_for('dashboard'))
-    flash("La gestión de usuarios aún no está implementada.", "info")
-    return render_template('users_placeholder.html')
-
-
-# --- RUTAS DE GESTIÓN DE USUARIOS (Admin) ---
-
-
+@admin_required # Solo admins
+def admin_users():
+    """Página de administración de usuarios."""
+    try:
+        # Usar directamente User.query es más simple aquí
+        users = User.query.order_by(User.username).all()
+        delete_form = DeleteUserForm() # Formulario para el botón de eliminar en cada fila
+    except Exception as e:
+        flash(f"Error al obtener la lista de usuarios: {e}", "danger")
+        users = []
+        delete_form = None # No mostrar botones de borrar si falla la carga
+        print(f"Error en admin_users: {e}\n{traceback.format_exc()}")
+    return render_template('admin_users.html', title='Administrar Usuarios', users=users, delete_form=delete_form)
 
 
 @app.route('/admin/users/new', methods=['GET', 'POST'])
 @login_required
-@admin_required # Solo admins pueden crear usuarios
-def create_user():
-    """Página para crear un nuevo usuario (solo admin)."""
-    form = UserAdminForm() # Usamos el formulario admin
+@admin_required
+def admin_new_user():
+    """Crea un nuevo usuario desde el panel de administración."""
+    form = UserAdminForm() # Usar el mismo form para crear/editar
+
     if form.validate_on_submit():
         try:
-            # Verificar si el username o email ya existen (aunque el form ya lo hace, es una capa extra)
-            existing_user = User.query.filter_by(username=form.username.data).first()
-            if existing_user:
-                 flash('Nombre de usuario ya existe.', 'danger')
-                 return render_template('user_form.html', title='Crear Usuario', form=form)
+            # La contraseña es requerida al crear
+            if not form.password.data:
+                 # Añadir error al campo de contraseña en el formulario
+                 form.password.errors.append("La contraseña es obligatoria al crear un usuario.")
+                 # Renderizar de nuevo con el error
+                 return render_template('admin_edit_user.html', title='Crear Nuevo Usuario', form=form, user=None)
 
-            existing_email = User.query.filter_by(email=form.email.data).first()
-            if existing_email:
-                 flash('Email ya registrado.', 'danger')
-                 return render_template('user_form.html', title='Crear Usuario', form=form)
-
-            new_user = User(username=form.username.data,
-                            email=form.email.data,
-                            is_admin=form.is_admin.data)
-            # La contraseña es obligatoria al crear
-            if form.password.data:
-                 new_user.set_password(form.password.data)
-            else:
-                 flash("La contraseña es obligatoria para crear un nuevo usuario.", "danger")
-                 return render_template('user_form.html', title='Crear Usuario', form=form) # Volver a mostrar el form
+            # Crear instancia User
+            new_user = User(
+                username=form.username.data,
+                email=form.email.data,
+                is_admin=form.is_admin.data
+            )
+            new_user.set_password(form.password.data) # Hashear contraseña
 
             db.session.add(new_user)
             db.session.commit()
             flash(f'Usuario "{new_user.username}" creado exitosamente.', 'success')
-            print(f"INFO: Admin {current_user.username} creó usuario {new_user.username}.")
-            return redirect(url_for('list_users')) # Redirigir a la lista
+            return redirect(url_for('admin_users'))
         except Exception as e:
-            db.session.rollback() # Revertir cambios en caso de error
-            flash(f'Error creando usuario: {e}', 'danger')
-            print(f"ERROR creando usuario admin: {e}\n{traceback.format_exc()}")
+            db.session.rollback()
+            flash(f'Error al crear el usuario: {e}', 'danger')
+            print(f"Error en admin_new_user: {e}\n{traceback.format_exc()}")
+            # Renderizar de nuevo el formulario en caso de error de BD u otro
+            return render_template('admin_edit_user.html', title='Crear Nuevo Usuario', form=form, user=None)
 
-    # Si es GET o el formulario no validó
-    return render_template('user_form.html', title='Crear Usuario', form=form)
+    # Método GET o si el form no es válido
+    return render_template('admin_edit_user.html', title='Crear Nuevo Usuario', form=form, user=None) # Pasar user=None para indicar creación
 
 
-@app.route('/admin/users/<int:user_id>/edit', methods=['GET', 'POST'])
+@app.route('/admin/users/edit/<int:user_id>', methods=['GET', 'POST'])
 @login_required
-@admin_required # Solo admins pueden editar usuarios
-def edit_user(user_id):
-    """Página para editar un usuario existente (solo admin)."""
-    user = User.query.get_or_404(user_id) # Obtener el usuario por ID, o mostrar 404
-
-    # Pre-llenar el formulario con los datos actuales del usuario para GET
-    # Usamos el formulario base con los originales para la validación de unicidad
-    form = UserAdminForm(original_username=user.username, original_email=user.email)
+@admin_required
+def admin_edit_user(user_id):
+    """Edita un usuario existente."""
+    user = User.query.get_or_404(user_id) # Obtener usuario o 404 si no existe
+    # Pasar el username/email originales al form para validación correcta
+    form = UserAdminForm(original_username=user.username, original_email=user.email, obj=user) # Cargar datos del usuario en el form
 
     if form.validate_on_submit():
         try:
-            # Actualizar datos del usuario
+            # Actualizar datos del usuario desde el form
             user.username = form.username.data
             user.email = form.email.data
             user.is_admin = form.is_admin.data
-
-            # Solo cambiar la contraseña si se proporcionó una nueva
+            # Actualizar contraseña SOLO si se proporcionó una nueva
             if form.password.data:
-                 user.set_password(form.password.data)
-                 flash('Contraseña de usuario actualizada.', 'info') # Notificar que la contraseña fue cambiada
+                user.set_password(form.password.data)
 
             db.session.commit()
             flash(f'Usuario "{user.username}" actualizado exitosamente.', 'success')
-            print(f"INFO: Admin {current_user.username} editó usuario {user.username} (ID: {user.id}).")
-            return redirect(url_for('list_users')) # Redirigir a la lista
+            return redirect(url_for('admin_users'))
         except Exception as e:
-            db.session.rollback() # Revertir cambios
-            flash(f'Error actualizando usuario: {e}', 'danger')
-            print(f"ERROR editando usuario admin {user_id}: {e}\n{traceback.format_exc()}")
+            db.session.rollback()
+            flash(f'Error al actualizar el usuario: {e}', 'danger')
+            print(f"Error en admin_edit_user (ID: {user_id}): {e}\n{traceback.format_exc()}")
+            # Renderizar de nuevo el form con los datos actuales (antes del error)
+            return render_template('admin_edit_user.html', title=f'Editar Usuario: {user.username}', form=form, user=user)
 
-    # Si es GET, pre-llenar el formulario para mostrar
-    elif request.method == 'GET':
-        form.username.data = user.username
-        form.email.data = user.email
-        form.is_admin.data = user.is_admin
-        # No pre-llenamos el campo de contraseña por seguridad
-
-    # Renderizar la misma plantilla de formulario, pero para edición
-    return render_template('user_form.html', title=f'Editar Usuario: {user.username}', form=form, user=user)
+    # Método GET: Mostrar formulario con datos cargados (WTForms-Alchemy lo hace con obj=user)
+    return render_template('admin_edit_user.html', title=f'Editar Usuario: {user.username}', form=form, user=user)
 
 
-@app.route('/admin/users/<int:user_id>/delete', methods=['POST'])
+@app.route('/admin/users/delete/<int:user_id>', methods=['POST']) # Solo POST para eliminar
 @login_required
-@admin_required # Solo admins pueden eliminar
-def delete_user(user_id):
-    """Ruta para eliminar un usuario (solo admin)."""
-    user = User.query.get_or_404(user_id) # Obtener usuario a eliminar
+@admin_required
+def admin_delete_user(user_id):
+    """Elimina un usuario."""
+    # Evitar que el admin se elimine a sí mismo
+    if current_user.id == user_id:
+        flash('No puedes eliminar tu propia cuenta de administrador.', 'danger')
+        return redirect(url_for('admin_users'))
 
-    # Opcional: añadir una verificación para no permitir que un admin se elimine a sí mismo
-    if user.id == current_user.id:
-        flash("No puedes eliminar tu propia cuenta de administrador.", "danger")
-        return redirect(url_for('list_users'))
+    user = User.query.get_or_404(user_id)
+    # Usar un formulario de confirmación (aunque aquí se valida directamente)
+    form = DeleteUserForm() # Crear instancia para validación CSRF si está habilitada
 
-    # Opcional: Puedes usar el formulario de confirmación si lo deseas, o simplemente procesar el POST
-    # form = DeleteUserForm()
-    # if form.validate_on_submit(): # Si usas un formulario con submit
-    try:
-        db.session.delete(user)
-        db.session.commit()
-        flash(f'Usuario "{user.username}" eliminado exitosamente.', 'success')
-        print(f"INFO: Admin {current_user.username} eliminó usuario {user.username} (ID: {user.id}).")
-    except Exception as e:
-        db.session.rollback() # Revertir cambios
-        flash(f'Error eliminando usuario "{user.username}": {e}', 'danger')
-        print(f"ERROR eliminando usuario admin {user_id}: {e}\n{traceback.format_exc()}")
-
-    # Siempre redirigir a la lista de usuarios después de la operación
-    return redirect(url_for('list_users'))
-
-# --- Ejecución ---
-if __name__ == '__main__':
-    # Usar el contexto de la aplicación para operaciones de BD al inicio
-    with app.app_context():
-        print("INFO: Creando tablas BD si no existen...");
-        time_start = datetime.datetime.now()
-        # --- Bloque try/except externo para la conexión/creación inicial ---
+    if form.validate_on_submit(): # Valida el token CSRF
         try:
-            # Intentar crear todas las tablas definidas en los modelos
-            db.create_all()
-            print(f"INFO: Tablas verificadas/creadas ({(datetime.datetime.now() - time_start).total_seconds():.2f}s).")
+            username = user.username # Guardar nombre para mensaje flash
+            db.session.delete(user)
+            db.session.commit()
+            flash(f'Usuario "{username}" eliminado exitosamente.', 'success')
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Error al eliminar el usuario: {e}', 'danger')
+            print(f"Error en admin_delete_user (ID: {user_id}): {e}\n{traceback.format_exc()}")
+    else:
+        # Si falla la validación CSRF (si está activa)
+        flash('Error de validación al intentar eliminar el usuario. Intenta de nuevo.', 'danger')
 
-            # Comprobar si ya existen usuarios para no intentar crear el admin de nuevo
+    return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/model', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def admin_model_config():
+    """Página para configurar y re-entrenar el modelo."""
+    config_form = ModelConfigForm()
+    current_config = {} # Inicializar como dict vacío
+
+    # Cargar configuración actual del detector si existe un método para ello
+    try:
+         if hasattr(detector, 'get_config'):
+              current_config = detector.get_config()
+              if not isinstance(current_config, dict): # Asegurar que sea un dict
+                   print(f"WARN: detector.get_config() no devolvió un dict, sino {type(current_config)}. Usando dict vacío.")
+                   current_config = {}
+         else:
+              print("WARN: ThreatDetector no tiene el método get_config().")
+    except Exception as e_get_cfg:
+         print(f"Error llamando a detector.get_config(): {e_get_cfg}")
+         # Mantener current_config como dict vacío
+
+    if config_form.validate_on_submit():
+        try:
+            new_threshold = config_form.detection_threshold.data
+            # Asume que el detector tiene un método para actualizar su config
+            if hasattr(detector, 'update_config'):
+                 # Pasar un diccionario con la configuración a actualizar
+                 update_success = detector.update_config({'detection_threshold': new_threshold})
+                 if update_success: # Asumiendo que update_config devuelve True/False
+                     flash(f'Umbral de detección actualizado a {new_threshold}.', 'success')
+                     # Volver a obtener la config actualizada para mostrarla
+                     if hasattr(detector, 'get_config'):
+                          current_config = detector.get_config()
+                          if not isinstance(current_config, dict): current_config = {}
+                 else:
+                     flash('Falló la actualización de la configuración en ThreatDetector.', 'warning')
+            else:
+                 flash('Funcionalidad para actualizar configuración no implementada en ThreatDetector.', 'warning')
+
+        except Exception as e_update_cfg:
+            flash(f'Error al actualizar la configuración del modelo: {e_update_cfg}', 'danger')
+            print(f"Error en admin_model_config (POST - update_config): {e_update_cfg}\n{traceback.format_exc()}")
+
+        # Redirigir a la misma página (GET) después de procesar POST para evitar reenvío de form
+        return redirect(url_for('admin_model_config'))
+
+    # Método GET o si el form no es válido: Llenar el form con valores actuales
+    # Usar .get() con default por si la clave no existe en current_config
+    config_form.detection_threshold.data = current_config.get('detection_threshold', 0.5)
+
+    # Obtener información adicional del detector
+    model_loaded = detector.is_model_loaded() if hasattr(detector, 'is_model_loaded') else False
+    scaler_loaded = detector.is_scaler_loaded() if hasattr(detector, 'is_scaler_loaded') else False
+    model_info = "N/A"
+    try:
+        if hasattr(detector, 'get_model_info'):
+            model_info = detector.get_model_info()
+        else:
+             print("WARN: ThreatDetector no tiene el método get_model_info().")
+    except Exception as e_get_info:
+        print(f"Error llamando a detector.get_model_info(): {e_get_info}")
+
+
+    context = {
+        'title': 'Configuración del Modelo',
+        'config_form': config_form,
+        'current_config': current_config,
+        'model_loaded': model_loaded,
+        'scaler_loaded': scaler_loaded, # Mostrar estado del scaler también
+        'model_info': model_info # Info del modelo cargado
+    }
+    return render_template('admin_model.html', **context)
+
+
+@app.route('/admin/retrain', methods=['POST']) # Solo POST para iniciar acción
+@login_required
+@admin_required
+def admin_retrain_model():
+    """Inicia el proceso de re-entrenamiento del modelo."""
+    print("DEBUG: Solicitud de re-entrenamiento recibida.")
+    try:
+        # Asume que AdminManager tiene un método para iniciar el re-entrenamiento
+        # Este proceso debería ser ASÍNCRONO en una aplicación real (ej. con Celery)
+        # Aquí se llama de forma síncrona como placeholder
+        if not hasattr(admin_manager, 'retrain_model'):
+             flash("Funcionalidad de re-entrenamiento no implementada en AdminManager.", 'danger')
+             return redirect(url_for('admin_model_config'))
+
+        print("DEBUG: Llamando a admin_manager.retrain_model()...")
+        result = admin_manager.retrain_model() # Podría necesitar parámetros (ej. dataset a usar)
+        print(f"DEBUG: admin_manager.retrain_model() devolvió: {result}")
+
+        if result and isinstance(result, dict) and result.get('success'):
+            flash(f"Re-entrenamiento iniciado/completado. {result.get('message', '')}", 'success')
+
+            # Forzar la recarga del modelo Y scaler en el detector después de reentrenar
+            new_model_path = result.get('new_model_path')
+            new_scaler_path = result.get('new_scaler_path') # Asumo que retrain_model devuelve la ruta del nuevo scaler también
+
+            reloaded_model = False
+            reloaded_scaler = False
+
+            # Intentar cargar el NUEVO modelo si se especificó ruta
+            if new_model_path and os.path.exists(new_model_path):
+                 if hasattr(detector, 'load_model'):
+                     try:
+                         detector.load_model(new_model_path)
+                         flash(f"Nuevo modelo cargado en el detector desde: {os.path.basename(new_model_path)}.", "info")
+                         reloaded_model = True
+                     except Exception as e_load_m:
+                          flash(f"Error al cargar el nuevo modelo: {e_load_m}", "danger")
+                          print(f"Error en detector.load_model({new_model_path}): {e_load_m}")
+                 else:
+                     flash("Detector no tiene método load_model. Reinicia la aplicación para usar el nuevo modelo.", "warning")
+            # Si no hay ruta nueva O falló, intentar recargar el modelo por defecto (si el método lo permite)
+            elif hasattr(detector, 'load_model') and not reloaded_model:
+                 try:
+                     detector.load_model() # Asume que load_model sin args recarga el configurado por defecto
+                     flash("Intentando recargar modelo por defecto en el detector.", "info")
+                     reloaded_model = True
+                 except Exception as e_load_def_m:
+                     flash(f"Error al recargar modelo por defecto: {e_load_def_m}", "warning")
+                     print(f"Error en detector.load_model() por defecto: {e_load_def_m}")
+
+
+            # Intentar cargar el NUEVO scaler si se especificó ruta
+            if new_scaler_path and os.path.exists(new_scaler_path):
+                 if hasattr(detector, 'load_scaler'):
+                     try:
+                         detector.load_scaler(new_scaler_path)
+                         flash(f"Nuevo scaler cargado en el detector desde: {os.path.basename(new_scaler_path)}.", "info")
+                         reloaded_scaler = True
+                     except Exception as e_load_s:
+                          flash(f"Error al cargar el nuevo scaler: {e_load_s}", "danger")
+                          print(f"Error en detector.load_scaler({new_scaler_path}): {e_load_s}")
+                 else:
+                     flash("Detector no tiene método load_scaler. Reinicia la aplicación para usar el nuevo scaler.", "warning")
+             # Si no hay ruta nueva O falló, intentar recargar el scaler por defecto (si el método lo permite)
+            elif hasattr(detector, 'load_scaler') and not reloaded_scaler:
+                 try:
+                     detector.load_scaler() # Asume que load_scaler sin args recarga el configurado por defecto
+                     flash("Intentando recargar scaler por defecto en el detector.", "info")
+                     reloaded_scaler = True
+                 except Exception as e_load_def_s:
+                      flash(f"Error al recargar scaler por defecto: {e_load_def_s}", "warning")
+                      print(f"Error en detector.load_scaler() por defecto: {e_load_def_s}")
+
+
+            if not reloaded_model or not reloaded_scaler:
+                 flash("Advertencia: No se pudieron cargar/recargar correctamente el modelo y/o scaler después del re-entrenamiento. Puede ser necesario reiniciar la aplicación.", "warning")
+
+        else:
+            error_msg = result.get('message', 'Error desconocido') if isinstance(result, dict) else str(result)
+            flash(f"Falló el re-entrenamiento: {error_msg}", 'danger')
+            print(f"ERROR: Re-entrenamiento fallido. Mensaje: {error_msg}")
+
+    except Exception as e:
+        flash(f'Error crítico al intentar re-entrenar: {e}', 'danger')
+        print(f"Error CRITICO en admin_retrain_model: {e}\n{traceback.format_exc()}")
+
+    return redirect(url_for('admin_model_config'))
+
+
+# --- Rutas para Descargar Reportes ---
+@app.route('/download_report/<report_format>')
+@login_required
+def download_report(report_format):
+    """Genera y descarga el reporte de la última detección en PDF o CSV."""
+    last_analysis = session.get('last_analysis', {})
+    detection_results = last_analysis.get('detection_results')
+
+    if not detection_results:
+        flash('No hay resultados de detección para generar un reporte.', 'warning')
+        return redirect(url_for('dashboard')) # O view_detection_results si prefieres
+
+    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Usar nombre de archivo original si está disponible, sino genérico
+    source_filename = last_analysis.get('data_info', {}).get('filename', 'data')
+    safe_source_filename = secure_filename(source_filename).replace('.csv', '') # Limpiar nombre
+    base_filename = f"detection_report_{safe_source_filename}_{timestamp_str}"
+
+    if report_format == 'pdf':
+        pdf_filename_full = os.path.join(app.config['REPORT_FOLDER'], f"{base_filename}.pdf")
+        print(f"DEBUG: Generando reporte PDF en: {pdf_filename_full}")
+        success = generate_detection_report_pdf(detection_results, pdf_filename_full)
+        if success:
+            try:
+                # Enviar archivo para descarga
+                return send_file(pdf_filename_full,
+                                 as_attachment=True,
+                                 download_name=f"{base_filename}.pdf", # Nombre que verá el usuario
+                                 mimetype='application/pdf')
+            except Exception as e_send:
+                 flash(f"Error al enviar el archivo PDF: {e_send}", "danger")
+                 print(f"Error enviando PDF {pdf_filename_full}: {e_send}")
+                 return redirect(url_for('view_detection_results'))
+            # finally:
+                 # Opcional: eliminar archivo después de enviar? O dejarlo en /reports
+                 # if os.path.exists(pdf_filename_full): os.remove(pdf_filename_full)
+                 # pass # Dejar el archivo en /reports por defecto
+        else:
+            flash('Error al generar el reporte PDF.', 'danger')
+            return redirect(url_for('view_detection_results'))
+
+    elif report_format == 'csv':
+        print(f"DEBUG: Generando contenido de reporte CSV...")
+        csv_content = generate_detection_report_csv(detection_results)
+        if csv_content:
+            # Crear respuesta CSV
+            response = make_response(csv_content)
+            response.headers['Content-Disposition'] = f'attachment; filename={base_filename}.csv'
+            response.headers['Content-Type'] = 'text/csv; charset=utf-8' # Especificar charset
+            print(f"DEBUG: Enviando reporte CSV: {base_filename}.csv")
+            return response
+        else:
+            flash('Error al generar el reporte CSV.', 'danger')
+            return redirect(url_for('view_detection_results'))
+
+    else:
+        flash('Formato de reporte no válido. Use "pdf" o "csv".', 'danger')
+        return redirect(url_for('view_detection_results'))
+
+
+# --- Manejadores de Errores HTTP ---
+@app.errorhandler(404)
+def not_found_error(error):
+    return render_template('errors/404.html', title='Página no Encontrada'), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    # Revertir sesión de BD por si acaso hubo un error a mitad de una transacción
+    try:
+        db.session.rollback()
+    except Exception as e_rollback:
+        print(f"WARN: Error durante rollback en errorhandler 500: {e_rollback}")
+
+    # Loggear el error completo
+    print(f"INTERNAL SERVER ERROR: {error}\n{traceback.format_exc()}")
+    return render_template('errors/500.html', title='Error Interno del Servidor'), 500
+
+@app.errorhandler(403)
+def forbidden_error(error):
+    # Error común si admin_required falla
+    return render_template('errors/403.html', title='Acceso Prohibido'), 403
+
+@app.errorhandler(401)
+def unauthorized_error(error):
+     # Para errores 401 (no autorizado) que no maneja Flask-Login, redirigir a login
+     flash("Debes iniciar sesión para acceder a esta página.", "warning")
+     return redirect(url_for('login', next=request.url))
+
+
+# --- Inicialización y Ejecución ---
+if __name__ == '__main__':
+    # Crear tablas de la BD si no existen y el usuario admin inicial
+    # Usar app.app_context() para asegurar que las operaciones de BD tienen el contexto de la app
+    with app.app_context():
+        print("DEBUG: Entrando en app_context para inicializar BD...")
+        try:
+            # Crear todas las tablas definidas en los modelos (ej. User)
+            db.create_all()
+            print("INFO: Tablas de la base de datos verificadas/creadas.")
+
+            # Crear usuario admin inicial si no existe ninguno
             if User.query.count() == 0:
                 print("INFO: No existen usuarios. Creando usuario admin inicial...")
-                # --- Bloque try/except interno para la creación del admin ---
                 try:
+                    # ¡¡¡CAMBIAR ESTA CONTRASEÑA POR DEFECTO INMEDIATAMENTE!!!
+                    admin_password = os.environ.get("ADMIN_DEFAULT_PASSWORD", "password")
                     admin_user = User(username='admin', email='admin@example.com', is_admin=True)
-                    admin_user.set_password('password') # ¡CAMBIAR ESTA CONTRASEÑA POR DEFECTO!
+                    admin_user.set_password(admin_password)
                     db.session.add(admin_user)
                     db.session.commit()
-                    print("INFO: Usuario 'admin' creado / pass: 'password'. ¡POR FAVOR CAMBIARLA!")
-                # Manejar error específico al crear el admin
+                    print(f"INFO: Usuario 'admin' creado con contraseña por defecto ('{admin_password}'). ¡POR FAVOR CAMBIARLA!")
                 except Exception as e_admin:
                     db.session.rollback() # Revertir si falla la creación del admin
                     print(f"ERROR: No se pudo crear usuario admin inicial: {e_admin}")
-                # --- Fin try/except interno ---
+                    print(traceback.format_exc())
+            else:
+                 print("INFO: Ya existen usuarios en la base de datos.")
 
-        # Manejar error general de conexión o creación de tablas
         except Exception as e_db:
-            print(f"ERROR: No se pudo conectar o crear tablas en la BD: {e_db}")
-            print("Verifica la configuración deSQLALCHEMY_DATABASE_URI y que el servidor MySQL esté corriendo.")
+            print(f"ERROR CRÍTICO: No se pudo conectar o inicializar la base de datos: {e_db}")
+            print("Verifica la configuración deSQLALCHEMY_DATABASE_URI, que el servidor MySQL/MariaDB")
+            print("esté corriendo, y que la base de datos especificada ('cyber_db') exista.")
+            print(traceback.format_exc())
             exit() # Salir si no se puede inicializar la BD
-        # --- Fin try/except externo ---
 
-    # Iniciar el servidor Flask (fuera del with app.app_context() para la creación inicial)
+        print("DEBUG: Saliendo de app_context.")
+
+    # Iniciar el servidor Flask
+    # host='0.0.0.0' permite conexiones desde otras máquinas en la red
+    # debug=True es útil para desarrollo (recarga automática, debugger), ¡DESACTIVAR en producción!
     print("INFO: Iniciando servidor Flask...")
-    # Cambiar debug=False para producción
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Obtener puerto de variable de entorno o usar 5000 por defecto
+    port = int(os.environ.get("PORT", 5000))
+    # debug=True generalmente no se recomienda para producción directamente
+    # Se puede controlar con una variable de entorno
+    debug_mode = os.environ.get("FLASK_DEBUG", "True").lower() in ['true', '1', 't']
+    print(f"INFO: Ejecutando en http://0.0.0.0:{port}/ | Modo Debug: {debug_mode}")
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)

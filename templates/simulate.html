@@ -1,0 +1,163 @@
+{% extends 'base.html' %}
+
+{% block title %}Simulador de Amenazas{% endblock %}
+
+{% block content %}
+<h1>💥 Simulador de Amenazas</h1>
+<p>Genera escenarios de tráfico de red y ataques cibernéticos.</p>
+
+<div class="action-card">
+    <h2>Configurar y Ejecutar Simulación</h2>
+    {# --- CORREGIDO: Cambiado 'simulate' por 'simulate_threats_route' --- #}
+    <form method="POST" action="{{ url_for('simulate_threats_route') }}">
+        <div class="form-group">
+            <label for="duration">Duración (segundos):</label>
+            {# --- CORRECCIÓN AQUÍ: Comprobar si last_simulation_info existe --- #}
+            {# Usar .get() para acceso seguro a config y luego al valor #}
+            <input type="number" id="duration" name="duration" value="{{ last_simulation_info.config.get('duration', 60) if last_simulation_info and last_simulation_info.config else 60 }}" min="5" max="3600" required>
+        </div>
+        <div class="form-group">
+            <label for="intensity">Intensidad del Ataque (low, medium, high):</label>
+            {# El input number anterior esperaba un rango 1-10, pero el simulador usa 'low','medium','high'. Ajustar el tipo de input. #}
+            {# Cambiamos a select para usar los niveles textuales #}
+             <select id="intensity" name="intensity" required>
+                 {% set last_intensity = last_simulation_info.config.get('intensity', 'medium') if last_simulation_info and last_simulation_info.config else 'medium' %}
+                 {% set possible_intensities = ['low', 'medium', 'high'] %}
+                 {% for level in possible_intensities %}
+                     <option value="{{ level }}" {% if level == last_intensity %}selected{% endif %}>{{ level | capitalize }}</option>
+                 {% endfor %}
+             </select>
+
+        </div>
+        <div class="form-group">
+            <label for="attack_type">Tipo de Ataque para simular:</label> {# Cambiado 'attacks' a 'attack_type' para coincidir con el ThreatSimulator #}
+            {# El input select anterior era 'multiple' para 'attacks', pero el simulador usa 'attack_type' (singular) #}
+            {# Si quieres simular *múltiples* tipos en una corrida, la lógica del simulador debería ajustarse #}
+            {# Asumimos por ahora que eliges UN tipo principal para la simulación #}
+             <select id="attack_type" name="attack_type" required size="4">
+                 {% set last_attack_type = last_simulation_info.config.get('attack_type', 'DDoS') if last_simulation_info and last_simulation_info.config else 'DDoS' %}
+                 {% set possible_attacks = ['DDoS', 'PortScan', 'Malware', 'Infiltration', 'Botnet', 'Web Attack'] %} {# Añadir más opciones si tu simulador las genera #}
+                 {% for type_option in possible_attacks %}
+                     <option value="{{ type_option }}" {% if type_option == last_attack_type %}selected{% endif %}>
+                         {# Mostrar nombres más descriptivos #}
+                         {% if type_option == 'PortScan' %}Escaneo de Puertos
+                         {% elif type_option == 'Web Attack' %}Ataque Web
+                         {% else %}{{ type_option }}{% endif %}
+                     </option>
+                 {% endfor %}
+            </select>
+        </div>
+         <div class="form-group">
+             <label for="target">IP de Destino (opcional):</label>
+             {# Usar .get() para acceso seguro a config y luego al valor #}
+             <input type="text" id="target" name="target" value="{{ last_simulation_info.config.get('target', '') if last_simulation_info and last_simulation_info.config else '' }}" placeholder="Ej: 10.0.1.10">
+         </div>
+        <div class="form-group">
+            <button type="submit" class="button">Ejecutar Simulación</button>
+        </div>
+    </form>
+</div>
+
+{# Mostrar vista previa de la última simulación si existe (usando dataframe_head del historial) #}
+{# La vista previa ahora viene del historial de detección si se usó la simulación para detectar #}
+{# Si quieres mostrar la vista previa del DF bruto generado por el simulador antes de detección, necesitas otra variable #}
+{# Asumimos que la vista previa que quieres aquí es la del DF TAL COMO SE USÓ para la última detección (si vino de simulación) #}
+{# O, si ejecutas simulación pero NO detección, mostrar una vista previa del DF simulado directamente (necesita pasar ese DF a la plantilla) #}
+{# Vamos a mostrar la vista previa si hay un 'last_simulated_df_preview' pasado a la plantilla #}
+{% if last_simulated_df_preview is not none and not last_simulated_df_preview.empty %}
+    <div class="preview-section">
+        <h2>
+            Últimos Datos Simulados Generados
+            {# Puedes añadir info como timestamp si pasas metadatos junto al DF de preview #}
+             {# {% if last_sim_metadata %} ({{ last_sim_metadata.timestamp | format_datetime }}) {% endif %} #}
+        </h2>
+        <div class="table-container">
+            {# Renderizar el DataFrame pasado desde Flask #}
+            {{ last_simulated_df_preview.to_html(classes=['data-table', 'table-sm'], border=0, index=False, max_rows=100) | safe }}
+        </div>
+        {# Opción para usar estos datos en Detección (requiere lógica en la ruta /detect) #}
+        {# Si guardaste el DF simulado a un archivo temporal, puedes pasar la ruta y usarla aquí #}
+        {# Esto requiere que la ruta '/detect' acepte un parámetro 'source=simulation' y quizás 'filepath=<ruta_temporal>' #}
+        {# Asumimos que la ruta 'detect_threats_route' maneja esto. #}
+        <form method="GET" action="{{ url_for('detect_threats_route') }}" style="margin-top: 1rem;"> {# Usar GET si solo pasas parámetros, POST si envías datos grandes #}
+             {# Pasa el ID del historial o la ruta del archivo temporal si es necesario para que /detect sepa qué datos usar #}
+             {# <input type="hidden" name="simulation_history_id" value="{{ last_simulation_info.id if last_simulation_info is defined else '' }}"> #}
+             {# O si guardaste el archivo temporal: #}
+             {# <input type="hidden" name="simulated_filepath" value="{{ last_simulated_filepath if last_simulated_filepath is defined else '' }}"> #}
+             <input type="hidden" name="source" value="simulation_last"> {# Indicador de fuente #}
+             <button type="submit" class="button button-secondary">Usar estos datos simulados para Detección</button>
+        </form>
+    </div>
+{% elif session.get('simulation_ran') %} {# Si se ejecutó la simulación pero no hay vista previa #}
+     <p class="alert alert-warning" style="margin-top: 1rem;">La última simulación se ejecutó, pero no se generó una vista previa de datos válida o hubo un error.</p>
+{% endif %}
+
+
+<div class="preview-section" style="margin-top: 2rem;">
+    <h2>Historial de Simulaciones (Metadata)</h2>
+     {# Asumimos que pasas 'simulation_history' a la plantilla #}
+    {% if simulation_history %}
+        <div class="table-container" style="max-height: 400px;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Fecha</th>
+                        <th>Configuración</th>
+                        <th>Registros Generados</th> {# Ajustado nombre de columna #}
+                        <th>Distribución Etiquetas Generadas</th> {# Ajustado nombre de columna #}
+                         <th>Archivo Generado</th> {# Columna para el archivo si se guardó #}
+                    </tr>
+                </thead>
+                <tbody>
+                    {# Mostrar en el orden que vienen desde Flask (deberían venir ordenadas por fecha descendente) #}
+                    {% for entry in simulation_history %}
+                    <tr>
+                        <td>{{ entry.timestamp_run | format_datetime if entry.timestamp_run is defined else 'N/A' }}</td> {# Usar el nombre de clave correcto 'timestamp_run' #}
+                        <td>
+                            {# Usar .get para acceso seguro a config #}
+                            Dur: {{ entry.config.get('duration', 'N/A') }}s,
+                            Int: {{ entry.config.get('intensity', 'N/A') }},
+                            Tipo: {{ entry.config.get('attack_type', 'N/A') }}, {# Usar 'attack_type' singular #}
+                            Target: {{ entry.config.get('target', 'N/A') }}
+                             {# Si simulaste multiples ataques y lo cambiaste, ajusta aquí #}
+                             {# Ataques: {{ entry.config.get('attacks', []) | join(', ') }} #}
+                        </td>
+                        <td>{{ entry.num_records if entry.num_records is defined else 'N/A' }}</td> {# Usar el nombre de clave correcto 'num_records' #}
+                        <td>
+                            {# Mostrar distribución de etiquetas de forma más compacta #}
+                            {% if entry.label_distribution is defined and entry.label_distribution %}
+                                {% for label, count in entry.label_distribution.items() %}
+                                    <span style="white-space: nowrap;">{{ label }}: {{ count }}</span><br>
+                                {% endfor %}
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        </td>
+                         <td>
+                             {% if entry.output_filepath is defined and entry.output_filepath %}
+                                 {# Enlace al archivo si quieres permitir descarga (requiere ruta Flask para servir archivos) #}
+                                 {# <a href="{{ url_for('download_simulated_data', filename=entry.output_filepath | basename) }}">Descargar</a> #}
+                                 {# O solo mostrar el nombre del archivo #}
+                                 {{ entry.output_filepath | basename }} {# basename es un filtro Jinja2 si lo tienes #}
+                             {% else %}
+                                 N/A
+                             {% endif %}
+                         </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <p>No se han ejecutado simulaciones.</p>
+    {% endif %}
+</div>
+
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    console.log("Simulator JS loaded");
+</script>
+{% endblock %}

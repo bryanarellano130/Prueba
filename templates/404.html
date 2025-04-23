@@ -1,0 +1,41 @@
+{# templates/404.html #}
+{% extends "base.html" %}
+
+{% block title %}Página No Encontrada{% endblock %}
+
+{% block content %}
+<div class="error-page">
+  <h1>🚫 404 - Página No Encontrada</h1>
+  <p>Lo sentimos, la página que buscas no existe o ha sido movida.</p>
+  <p>Puedes intentar:</p>
+  <ul>
+    <li>Revisar la dirección URL.</li>
+    <li>Volver al <a href="{{ url_for('dashboard') }}">Dashboard Principal</a>.</li>
+    {# Puedes añadir un enlace para contactar soporte si aplica #}
+    {# <li>Contactar al <a href="#">soporte técnico</a>.</li> #}
+  </ul>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .error-page {
+    text-align: center;
+    margin-top: 50px;
+    padding: 20px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+  }
+  .error-page h1 {
+    color: #dc3545; /* Color rojo Bootstrap para peligro */
+  }
+  .error-page ul {
+      list-style: none;
+      padding: 0;
+  }
+   .error-page li {
+      margin-bottom: 10px;
+  }
+</style>
+{% endblock %}

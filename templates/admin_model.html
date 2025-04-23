@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+
+{% block title %}Admin - Configuración del Modelo{% endblock %}
+
+{% block content %}
+<h1>🛠️ Admin - Configuración del Modelo</h1>
+<p>Gestiona el modelo de Machine Learning para la detección de amenazas.</p>
+
+{# Sección para mostrar el estado actual del modelo #}
+<div class="info-section">
+    <h2>Estado del Modelo</h2>
+    {# Asumimos que pasas info del modelo a la plantilla, ej. 'model_info' #}
+    {% if model_info is defined and model_info is not none %}
+        <p><strong>Tipo de Modelo:</strong> {{ model_info.get('Model Type', 'N/A') }}</p>
+        <p><strong>Estado del Scaler:</strong> {{ model_info.get('Scaler Type', 'N/A') }} (Ajustado: {{ model_info.get('Scaler Fitted', 'N/A') }})</p>
+        <p><strong>Umbral de Predicción:</strong> {{ model_info.get('Prediction Threshold', 'N/A') }}</p>
+        {# Puedes añadir más detalles del modelo si tu get_model_info los retorna #}
+        {# <p>Ruta Modelo: {{ model_info.get('Model Path', 'N/A') }}</p> #}
+        {# <p>Ruta Scaler: {{ model_info.get('Scaler Path', 'N/A') }}</p> #}
+
+         {# Mostrar mensaje si el modelo o scaler no están cargados #}
+         {% if not model_info.get('Model Type', 'N/A') != 'No cargado' or model_info.get('Scaler Fitted', 'No') != 'Sí' %}
+             <p class="alert alert-warning" style="margin-top: 0.5rem;">El modelo y/o scaler no están cargados o ajustados. La detección no funcionará correctamente.</p>
+         {% endif %}
+
+    {% else %}
+        <p>Información del modelo no disponible.</p>
+    {% endif %}
+</div>
+
+{# Sección para actualizar el umbral de predicción #}
+<div class="action-card" style="margin-top: 2rem;">
+    <h2>Configurar Umbral de Predicción</h2>
+    {# Formulario para actualizar el umbral. Asume que la ruta admin_model_config maneja POST. #}
+    <form method="POST" action="{{ url_for('admin_model_config') }}">
+        {# Opcional: Token CSRF #}
+        {# {{ form.csrf_token }} #}
+        <div class="form-group">
+            <label for="prediction_threshold">Nuevo Umbral (0.0 a 1.0):</label>
+            {# Usar el valor actual si está disponible, si no un placeholder #}
+            {# Asumiendo que pasas 'current_config' o similar a la plantilla con la config de admin/alert manager #}
+            <input type="number" id="prediction_threshold" name="prediction_threshold"
+                   value="{{ current_config.get('glm_threshold', 0.7) if current_config is defined else 0.7 }}"
+                   step="0.01" min="0.0" max="1.0" required> {# Usar step="0.01" para permitir decimales #}
+        </div>
+        <div class="form-group">
+            <button type="submit" name="action" value="update_threshold" class="button">Actualizar Umbral</button> {# Usar name="action" para identificar #}
+        </div>
+    </form>
+</div>
+
+{# Sección para reentrenar el modelo #}
+<div class="action-card" style="margin-top: 2rem;">
+    <h2>Re-entrenar Modelo</h2>
+    <p>Utiliza un dataset de entrenamiento para reentrenar el modelo y el scaler.</p>
+    {# Formulario para reentrenar. Esto probablemente debería ser una operación POST. #}
+    {# Asume que la ruta admin_model_config maneja POST y la acción 'retrain'. #}
+    <form method="POST" action="{{ url_for('admin_model_config') }}">
+         {# Indicar la acción #}
+        <input type="hidden" name="action" value="retrain">
+        {# Opcional: Campo para seleccionar el dataset de entrenamiento si no usas uno fijo #}
+        {# <div class="form-group"> #}
+        {#     <label for="dataset">Dataset de Entrenamiento:</label> #}
+        {#     <input type="text" id="dataset" name="dataset" placeholder="Ruta al archivo CSV"> #}
+        {# </div> #}
+        <div class="form-group">
+            <button type="submit" class="button button-warning"
+                    onclick="return confirm('¿Estás seguro de que deseas iniciar el re-entrenamiento? Esto puede tardar varios minutos.');">
+                Iniciar Re-entrenamiento
+            </button>
+        </div>
+    </form>
+    {# Puedes añadir aquí un área para mostrar el estado del reentrenamiento si es asíncrono #}
+</div>
+
+{# Opcional: Historial de Reentrenamientos #}
+{# <div class="info-section" style="margin-top: 2rem;"> #}
+{#     <h2>Historial de Reentrenamientos</h2> #}
+{#     <p>Tabla con fechas, datasets usados y métricas del reentrenamiento.</p> #}
+{#     {% if retraining_history %} #}
+{#         ... Tabla del historial ... #}
+{#     {% else %} #}
+{#         <p>No hay historial de reentrenamientos.</p> #}
+{#     {% endif %} #}
+{# </div> #}
+
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    console.log("Admin Model JS loaded");
+    // Puedes añadir JS aquí para validación adicional del umbral, mostrar progreso del reentrenamiento, etc.
+</script>
+{% endblock %}

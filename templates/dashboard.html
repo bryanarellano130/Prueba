@@ -8,34 +8,73 @@
 
 <div class="dashboard-metrics">
     <div class="metric-card">
-        <h2>Alertas Activas</h2>
-        <p class="metric-value">{{ active_alerts_count }}</p>
-        <a href="{{ url_for('alerts') }}">Ver Alertas</a>
+        <h2>Alertas Recientes</h2>
+        {# Asumiendo que pasas el número total o reciente de alertas activas como 'recent_alerts' y puedes contar en Jinja #}
+        <p class="metric-value">{{ recent_alerts|length if recent_alerts is not none else 0 }}</p> {# Mostrar conteo de recent_alerts #}
+        {# --- CORREGIDO: Cambiado 'alerts' por 'view_alerts' --- #}
+        <a href="{{ url_for('view_alerts') }}">Ver Alertas</a> {# Ajusta el nombre de la ruta si es diferente #}
     </div>
     <div class="metric-card">
         <h2>Última Detección</h2>
-        {% if last_detection %}
-            <p><strong>Fecha:</strong> {{ last_detection.timestamp | format_datetime }}</p> {# Necesitas un filtro Jinja2 para formatear fecha #}
-            <p><strong>Accuracy:</strong>
-                {% if last_detection.metrics.accuracy %}
-                    {{ "%.2f%%" % (last_detection.metrics.accuracy * 100) }}
+        {# --- CORREGIDO: Usar detection_results en lugar de last_detection --- #}
+        {% if detection_results %}
+            {# Verificar si la clave 'timestamp' existe #}
+            <p><strong>Fecha:</strong>
+                {% if detection_results.timestamp is defined and detection_results.timestamp is not none %}
+                     {{ detection_results.timestamp | format_datetime }} {# Usar el filtro de fecha #}
+                {% else %}
+                     N/A
+                {% endif %}
+            </p>
+            {# Verificar si la clave 'model_threshold' existe #}
+            <p><strong>Umbral:</strong>
+                {% if detection_results.model_threshold is defined and detection_results.model_threshold is not none %}
+                    {{ detection_results.model_threshold | float | round(4) }} {# Usar el filtro de formato #}
                 {% else %}
                     N/A
                 {% endif %}
             </p>
+             {# --- CORREGIDO: Verificar si 'metrics' existe ANTES de acceder a sus subclaves --- #}
+             <p><strong>Accuracy:</strong>
+                {% if detection_results.metrics is defined and detection_results.metrics is not none and detection_results.metrics.accuracy is defined and detection_results.metrics.accuracy is not none %}
+                    {{ "%.4f" % detection_results.metrics.accuracy }} {# Formatear accuracy a 4 decimales #}
+                {% else %}
+                    N/A {# Mostrar N/A si metrics o accuracy no existen #}
+                {% endif %}
+            </p>
+            {# Puedes añadir más métricas aquí con verificaciones similares (precision, recall, f1_score) #}
+            {# Ejemplo para Precision: #}
+            {# <p><strong>Precision:</strong> #}
+            {# {% if detection_results.metrics is defined and detection_results.metrics is not none and detection_results.metrics.precision is defined and detection_results.metrics.precision is not none %} #}
+            {#     {{ "%.4f" % detection_results.metrics.precision }} #}
+            {# {% else %} N/A {% endif %} #}
+            {# </p> #}
+
+
         {% else %}
-            <p>N/A</p>
+            <p>No hay resultados previos.</p>
         {% endif %}
-         <a href="{{ url_for('detect') }}">Ir a Detección</a>
+        {# Asumiendo que tienes una ruta 'detect' para iniciar el análisis #}
+        <a href="{{ url_for('detect_threats_route') }}">Ir a Detección</a> {# Ajusta el nombre de la ruta si es diferente #}
     </div>
     <div class="metric-card">
         <h2>Estado del Modelo</h2>
-        <p class="metric-value {% if 'Real' in model_status %}status-ok{% else %}status-sim{% endif %}">{{ model_status }}</p>
-         <a href="{{ url_for('admin_landing') }}">Configuración</a>
+        {# Asumiendo que pasas el estado del modelo como 'model_loaded' (True/False) y quizás alguna info adicional #}
+        {# En app.py pasamos 'model_loaded' y el detector tiene get_model_info() #}
+        {% if model_loaded is defined and model_loaded %} {# Verificar si model_loaded existe y es True #}
+             <p class="metric-value status-ok">Cargado y Listo</p>
+             {# Puedes mostrar info del modelo si la pasas a la plantilla #}
+             {# <p>Tipo: {{ model_info.Model_Type if model_info.Model_Type is defined else 'N/A' }}</p> #}
+        {% else %}
+             <p class="metric-value status-sim">No Cargado</p> {# Usar status-sim para indicar no listo #}
+        {% endif %}
+        {# Asumiendo que tienes una ruta 'admin_model_config' #}
+        <a href="{{ url_for('admin_model_config') }}">Configuración</a> {# Ajusta el nombre de la ruta si es diferente #}
     </div>
 </div>
 
 <h2>Actividad Reciente (Últimas 5 Alertas)</h2>
+{# Ya tenías una buena verificación aquí para recent_alerts #}
 {% if recent_alerts %}
     <table class="data-table">
         <thead>
@@ -49,14 +88,16 @@
             </tr>
         </thead>
         <tbody>
-            {% for alert in recent_alerts | reverse %} {# Mostrar más recientes primero #}
-            <tr class="severity-{{ alert.severity | lower }}">
-                <td>{{ alert.id }}</td>
-                <td>{{ alert.timestamp | format_datetime }}</td> {# Necesitas filtro #}
-                <td>{{ alert.type }}</td>
-                <td>{{ alert.severity }}</td>
-                <td>{{ 'Sí' if alert.reviewed else 'No' }}</td>
-                <td>{{ alert.details }}</td>
+            {# Mostrar en el orden que vienen, si ya están ordenadas del más reciente #}
+            {% for alert in recent_alerts %}
+            {# CORREGIDO: La clase CSS debería basarse en el valor de severidad #}
+            <tr class="severity-{{ alert.severity | lower if alert.severity is defined else 'info' }}"> {# Asegurar minúsculas y un default #}
+                <td>{{ alert.id if alert.id is defined else 'N/A' }}</td>
+                <td>{{ alert.timestamp | format_datetime if alert.timestamp is defined else 'N/A' }}</td> {# Usar filtro #}
+                <td>{{ alert.type if alert.type is defined else 'N/A' }}</td>
+                <td>{{ alert.severity if alert.severity is defined else 'N/A' }}</td>
+                <td>{{ 'Sí' if alert.reviewed is defined and alert.reviewed else 'No' }}</td> {# Verificar si 'reviewed' existe y es True #}
+                <td>{{ alert.details if alert.details is defined else 'N/A' }}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -64,6 +105,48 @@
 {% else %}
     <p>No hay alertas recientes.</p>
 {% endif %}
+
+{# --- Nueva sección opcional: Vista Previa del Último Análisis de Datos --- #}
+{# Si quieres mostrar la vista previa de datos cargada, puedes añadir algo así #}
+{# Asumiendo que pasas 'data_info' a la plantilla #}
+{% if data_info %}
+     <h2>Últimos Datos Cargados: {{ data_info.filename if data_info.filename is defined else 'Archivo Desconocido' }}</h2>
+     <p>Fuente: {{ data_info.source if data_info.source is defined else 'N/A' }}</p>
+     <p>Cargado: {{ data_info.timestamp | format_datetime if data_info.timestamp is defined else 'N/A' }}</p>
+     {# Asumiendo que data_info.dataframe_head es una lista de dicts #}
+     {% if data_info.dataframe_head is defined and data_info.dataframe_head is not none and data_info.dataframe_head|length > 0 %}
+         <h4>Vista Previa (Primeras filas):</h4>
+         <table class="data-table">
+             <thead>
+                 <tr>
+                     {# Obtener encabezados de la primera fila si existe #}
+                     {% for header in data_info.dataframe_head[0].keys() %}
+                          <th>{{ header }}</th>
+                     {% endfor %}
+                 </tr>
+             </thead>
+             <tbody>
+                   {# Iterar sobre cada fila (diccionario) #}
+                   {% for row in data_info.dataframe_head %}
+                       <tr>
+                           {# Iterar sobre los valores de cada fila en el orden de los encabezados #}
+                           {% for header in data_info.dataframe_head[0].keys() %}
+                               <td>{{ row[header] if row[header] is not none else '' }}</td> {# Mostrar valor o vacío si es None #}
+                           {% endfor %}
+                       </tr>
+                   {% endfor %}
+             </tbody>
+         </table>
+     {% else %}
+           <p>No hay vista previa de datos disponible.</p>
+     {% endif %}
+{% else %}
+     {# Mensaje si no se ha cargado ningún dato aún #}
+     <h2>No hay datos cargados.</h2>
+     <p>Por favor, ve a <a href="{{ url_for('upload_data') }}">Cargar Datos</a> para comenzar.</p>
+{% endif %}
+
+
 
 {% endblock %}
 
